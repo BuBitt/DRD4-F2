@@ -45,3 +45,5 @@ testdata/
 
 logs/log_file.log
 ncbi_cache.json
+banco-japao.fasta
+logs/log_file.log
