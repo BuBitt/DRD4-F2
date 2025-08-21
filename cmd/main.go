@@ -94,6 +94,15 @@ func main() {
 	}
 
 	// startup log with non-sensitive config
+	// Debug: show loaded config (avoid printing secrets)
+	logger.Debug("loaded config", "input_fasta", cfg.InputFasta, "output_json", cfg.OutputJSON, "log_file", cfg.LogFile, "log_level", cfg.LogLevel, "use_external_translator", cfg.UseExternalTranslator)
+	if cfg.LogFile != "" {
+		if logFileHandle != nil {
+			logger.Debug("log file open for append", "path", cfg.LogFile)
+		} else {
+			logger.Warn("log_file specified but could not be opened; logging to stderr only", "path", cfg.LogFile)
+		}
+	}
 	logger.Info("starting drd4", "input_fasta", cfg.InputFasta, "output_json", cfg.OutputJSON, "log_file", cfg.LogFile, "ncbi_cache_path", cfg.NcbiCachePath, "ncbi_cache_ttl_secs", cfg.NcbiCacheTTLSecs)
 
 	// allow config to override input filename
@@ -104,11 +113,13 @@ func main() {
 	// apply ncbi config
 	if cfg.NcbiCachePath != "" {
 		ncbi.SetCacheFilePath(cfg.NcbiCachePath)
+		logger.Debug("ncbi cache path set", "path", cfg.NcbiCachePath)
 	}
 	if cfg.NcbiApiKey != "" {
 		// set the API key directly from config.json (config-only mode)
 		os.Setenv("NCBI_API_KEY", cfg.NcbiApiKey)
 		logger.Info("ncbi api key set from config.json (value not logged)")
+		logger.Debug("ncbi api key provided in config (not logged)")
 	}
 	if cfg.NcbiCacheTTLSecs > 0 {
 		ncbi.SetCacheTTLSeconds(cfg.NcbiCacheTTLSecs)
@@ -126,13 +137,16 @@ func main() {
 
 		// Try to run MAFFT on the original FASTA file to get aligned sequences.
 		alignMap := make(map[string]string)
-		if _, err := exec.LookPath("mafft"); err == nil {
+		if mpath, err := exec.LookPath("mafft"); err == nil {
+			logger.Debug("mafft path", "path", mpath)
 			logger.Info("mafft found, running alignment")
-			cmd := exec.Command("mafft", "--auto", filename)
+			cmd := exec.Command(mpath, "--auto", filename)
+			logger.Debug("running command", "cmd", strings.Join(cmd.Args, " "))
 			out, err := cmd.Output()
 			if err != nil {
 				logger.Error("mafft failed", "err", err)
 			} else {
+				logger.Debug("mafft output size", "bytes", len(out))
 				aligned := fasta.ParseFasta(strings.NewReader(string(out)))
 				for _, a := range aligned {
 					alignMap[a.Header] = a.Sequence
@@ -155,6 +169,7 @@ func main() {
 		// write aligned FASTA to a temporary file
 		tmp, tmpErr := os.CreateTemp("", "aligned-*.fasta")
 		if tmpErr == nil {
+			logger.Debug("temp file created", "path", tmp.Name())
 			for _, rec := range records {
 				seq := rec.Sequence
 				if a, ok := alignMap[rec.Header]; ok && a != "" {
@@ -176,26 +191,32 @@ func main() {
 		protMap := make(map[string]string)
 		if tmpErr == nil && cfg.UseExternalTranslator {
 			// prefer transeq, then seqkit
-			if path, err := exec.LookPath("transeq"); err == nil {
+			if tpath, err := exec.LookPath("transeq"); err == nil {
 				logger.Info("using external translator", "tool", "transeq")
-				cmd := exec.Command(path, "-sequence", tmp.Name(), "-outseq", "-")
+				logger.Debug("transeq path", "path", tpath)
+				cmd := exec.Command(tpath, "-sequence", tmp.Name(), "-outseq", "-")
+				logger.Debug("running command", "cmd", strings.Join(cmd.Args, " "))
 				out, err := cmd.Output()
 				if err != nil {
 					logger.Error("transeq failed", "err", err)
 				} else {
+					logger.Debug("transeq output size", "bytes", len(out))
 					prots := fasta.ParseFasta(strings.NewReader(string(out)))
 					for _, p := range prots {
 						protMap[p.Header] = p.Sequence
 					}
 					logger.Info("transeq produced proteins", "count", len(prots))
 				}
-			} else if path, err := exec.LookPath("seqkit"); err == nil {
+			} else if tpath, err := exec.LookPath("seqkit"); err == nil {
 				logger.Info("using external translator", "tool", "seqkit")
-				cmd := exec.Command(path, "translate", "-w", "0", tmp.Name())
+				logger.Debug("seqkit path", "path", tpath)
+				cmd := exec.Command(tpath, "translate", "-w", "0", tmp.Name())
+				logger.Debug("running command", "cmd", strings.Join(cmd.Args, " "))
 				out, err := cmd.Output()
 				if err != nil {
 					logger.Error("seqkit translate failed", "err", err)
 				} else {
+					logger.Debug("seqkit output size", "bytes", len(out))
 					prots := fasta.ParseFasta(strings.NewReader(string(out)))
 					for _, p := range prots {
 						protMap[p.Header] = p.Sequence
