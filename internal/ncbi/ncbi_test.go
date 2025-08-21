@@ -3,6 +3,7 @@ package ncbi
 import (
 	"io/ioutil"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -38,6 +39,12 @@ func TestFetchTranslationFromGenBank_XML(t *testing.T) {
 			Header:     make(http.Header),
 		}, nil
 	})}
+	// use a temp cache file so test is hermetic
+	tmp := t.TempDir()
+	cacheFilePath = filepath.Join(tmp, "ncbi_cache.json")
+	// ensure cache is reset
+	cache = nil
+	cacheLoaded = false
 
 	got, err := FetchTranslationFromGenBank("FAKE_ACC")
 	if err != nil {
@@ -45,5 +52,19 @@ func TestFetchTranslationFromGenBank_XML(t *testing.T) {
 	}
 	if got != "MKQRST" {
 		t.Fatalf("expected MKQRST, got %q", got)
+	}
+
+	// second call should hit cache and not invoke HTTP transport; replace transport to fail if called
+	httpClient = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		t.Fatalf("HTTP should not be called on cached fetch")
+		return nil, nil
+	})}
+
+	got2, err := FetchTranslationFromGenBank("FAKE_ACC")
+	if err != nil {
+		t.Fatalf("unexpected error on cached fetch: %v", err)
+	}
+	if got2 != "MKQRST" {
+		t.Fatalf("expected MKQRST from cache, got %q", got2)
 	}
 }
