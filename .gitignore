@@ -42,5 +42,5 @@ testdata/
 # ignore generated protobufs or similar (if any)
 **/*.pb.go
 
-last-run.log
+logs/log_file.log
 ncbi_cache.json
