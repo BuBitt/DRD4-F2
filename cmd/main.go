@@ -71,7 +71,7 @@ func (tw *terminalWriter) Fd() uintptr { return tw.fd }
 func main() {
 	// CLI flags
 	inputFlag := flag.String("in", "drd4-tdah.fasta", "input FASTA file path")
-	outputFlag := flag.String("out", "drd4-database.json", "output JSON file path")
+	outputFlag := flag.String("out", "database.json", "output JSON file path")
 	configFlag := flag.String("config", "", "path to config.json (optional)")
 	externalFlag := flag.Bool("external", false, "enable external translator fallback (transeq/seqkit)")
 	mafftArgs := flag.String("mafft-args", "--auto", "additional arguments to pass to mafft (quoted)")
@@ -237,13 +237,14 @@ func main() {
 		}
 
 		type Variant struct {
-			Name             string `json:"name"`
-			VariantCode      string `json:"variant_code"`
-			Nucleotides      string `json:"nucleotides"`
-			Translated       string `json:"translated,omitempty"`
-			PBCount          int    `json:"pb_count,omitempty"`
-			AACount          int    `json:"aa_count,omitempty"`
-			NucleotidesAlign string `json:"nucleotides_align"`
+			Name              string `json:"name"`
+			VariantCode       string `json:"variant_code"`
+			Nucleotides       string `json:"nucleotides"`
+			Translated        string `json:"translated,omitempty"`
+			PBCount           int    `json:"pb_count,omitempty"`
+			AACount           int    `json:"aa_count,omitempty"`
+			TranslationSource string `json:"translation_source,omitempty"`
+			NucleotidesAlign  string `json:"nucleotides_align"`
 		}
 		var variants []Variant
 
@@ -401,6 +402,7 @@ func main() {
 			if acc != "" {
 				if t, ok := merged[acc]; ok && t != "" {
 					variants[i].Translated = t
+					variants[i].TranslationSource = "ncbi"
 					// try to read cached metadata (pb/aa)
 					if _, pb, aa, ok2 := ncbi.GetCachedMetadata(acc); ok2 {
 						variants[i].PBCount = pb
@@ -423,6 +425,7 @@ func main() {
 			translatedMap, _ := translator.TranslateMissing(missingForSeqkit, seqkitPath, 15*time.Second)
 			for idx, seq := range translatedMap {
 				variants[idx].Translated = seq
+				variants[idx].TranslationSource = "seqkit"
 				// seqkit produced protein sequence; record AA count and 0 for PB
 				variants[idx].AACount = len(seq)
 				variants[idx].PBCount = 0
@@ -437,7 +440,7 @@ func main() {
 		if err != nil {
 			logger.Fatal("json marshal failed", "err", err)
 		}
-		outPath := "drd4-database.json"
+		outPath := "database.json"
 		if cfg.OutputJSON != "" {
 			outPath = cfg.OutputJSON
 		}

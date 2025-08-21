@@ -55,14 +55,21 @@ var (
 			Padding(1).
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(borderColor)
+	// Source styles
+	sourceNCBIStyle    = lipgloss.NewStyle().Foreground(secondaryColor).Bold(true)
+	sourceSeqkitStyle  = lipgloss.NewStyle().Foreground(accentColor).Bold(true)
+	sourceUnknownStyle = lipgloss.NewStyle().Foreground(mutedColor)
 )
 
 type DRD4Record struct {
-	Name             string `json:"name"`
-	VariantCode      string `json:"variant_code"`
-	Nucleotides      string `json:"nucleotides"`
-	Translated       string `json:"translated"`
-	NucleotidesAlign string `json:"nucleotides_align"`
+	Name              string `json:"name"`
+	VariantCode       string `json:"variant_code"`
+	Nucleotides       string `json:"nucleotides"`
+	Translated        string `json:"translated"`
+	NucleotidesAlign  string `json:"nucleotides_align"`
+	PBCount           int    `json:"pb_count,omitempty"`
+	AACount           int    `json:"aa_count,omitempty"`
+	TranslationSource string `json:"translation_source,omitempty"`
 }
 
 type listItem struct {
@@ -74,13 +81,30 @@ func (i listItem) FilterValue() string {
 }
 
 func (i listItem) Title() string {
-	aaCount := len(i.record.Translated)
-	pbCount := len(i.record.NucleotidesAlign)
-	return fmt.Sprintf("%s (AA: %d) (PB: %d)", i.record.VariantCode, aaCount, pbCount)
+	// Title should show only the variant code
+	if i.record.VariantCode != "" {
+		return i.record.VariantCode
+	}
+	// fallback to name when code is missing
+	return i.record.Name
 }
 
 func (i listItem) Description() string {
-	return ""
+	// Metadata line shown below the title in the selector list
+	src := i.record.TranslationSource
+	if src == "" {
+		src = "unknown"
+	}
+	var srcRendered string
+	switch src {
+	case "ncbi":
+		srcRendered = sourceNCBIStyle.Render(src)
+	case "seqkit":
+		srcRendered = sourceSeqkitStyle.Render(src)
+	default:
+		srcRendered = sourceUnknownStyle.Render(src)
+	}
+	return fmt.Sprintf("Source: %s    PB: %d    AA: %d", srcRendered, i.record.PBCount, i.record.AACount)
 }
 
 type mode int
@@ -259,7 +283,30 @@ func (m model) renderRightPanel() string {
 	record := selectedItem.(listItem).record
 
 	// Header with variant info
-	header := titleStyle.Render(fmt.Sprintf("%s - %s", record.VariantCode, record.Name))
+	header := titleStyle.Render(fmt.Sprintf("%s - %s (%s)", record.VariantCode, record.Name, func() string {
+		if record.TranslationSource != "" {
+			return record.TranslationSource
+		}
+		return "unknown"
+	}()))
+
+	// Metadata line: source, PB and AA counts
+	src := record.TranslationSource
+	if src == "" {
+		src = "unknown"
+	}
+	// colorize the source token in the meta line
+	var srcColored string
+	switch record.TranslationSource {
+	case "ncbi":
+		srcColored = sourceNCBIStyle.Render("ncbi")
+	case "seqkit":
+		srcColored = sourceSeqkitStyle.Render("seqkit")
+	default:
+		srcColored = sourceUnknownStyle.Render("unknown")
+	}
+	meta := fmt.Sprintf("Source: %s    PB: %d    AA: %d", srcColored, record.PBCount, record.AACount)
+	metaStr := lipgloss.NewStyle().Foreground(mutedColor).Render(meta)
 
 	// Content based on current mode
 	var content string
@@ -276,6 +323,7 @@ func (m model) renderRightPanel() string {
 	panelContent := lipgloss.JoinVertical(
 		lipgloss.Left,
 		header,
+		metaStr,
 		"",
 		content,
 	)

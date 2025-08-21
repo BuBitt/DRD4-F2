@@ -1,6 +1,6 @@
 {
     "input_fasta": "drd4-tdah.fasta",
-    "output_json": "drd4-database.json",
+    "output_json": "database.json",
     "log_file": "last-run.log",
     "log_level": "debug",
     "ncbi_cache_path": "./ncbi_cache",

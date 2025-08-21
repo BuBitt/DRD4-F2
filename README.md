@@ -15,7 +15,7 @@ go build -o drd4 ./cmd
 Run:
 
 ```sh
-./drd4 -in drd4-tdah.fasta -out drd4-database.json
+./drd4 -in drd4-tdah.fasta -out database.json
 ```
 
 Useful flags:
