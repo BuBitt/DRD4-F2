@@ -1,407 +1,404 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
-	"io"
+	"io/ioutil"
+	"log"
 	"os"
-	"os/exec"
 	"strings"
-	"sync"
-	"time"
 
-	"drd4/internal/fasta"
-	"drd4/internal/ncbi"
-
+	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Simple TUI: left/main area shows a selectable list of FASTA headers and
-// their sequences; the right column shows a reference sequence.
+// Colors for modern design
+var (
+	primaryColor   = lipgloss.Color("#7C3AED") // Purple
+	secondaryColor = lipgloss.Color("#10B981") // Green
+	accentColor    = lipgloss.Color("#F59E0B") // Amber
+	surfaceColor   = lipgloss.Color("#1F2937") // Dark gray
+	textColor      = lipgloss.Color("#F3F4F6") // Light gray
+	mutedColor     = lipgloss.Color("#9CA3AF") // Muted gray
+	borderColor    = lipgloss.Color("#374151") // Border gray
+)
+
+// Styles
+var (
+	containerStyle = lipgloss.NewStyle().
+			Padding(0, 1).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(borderColor)
+
+	titleStyle = lipgloss.NewStyle().
+			Foreground(primaryColor).
+			Bold(true).
+			Align(lipgloss.Center)
+
+	selectedStyle = lipgloss.NewStyle().
+			Foreground(primaryColor).
+			Bold(true)
+
+	statusBarStyle = lipgloss.NewStyle().
+			Foreground(textColor).
+			Background(surfaceColor).
+			Padding(0, 1)
+
+	helpStyle = lipgloss.NewStyle().
+			Foreground(mutedColor).
+			Italic(true)
+
+	sequenceStyle = lipgloss.NewStyle().
+			Foreground(textColor).
+			Background(lipgloss.Color("#111827")).
+			Padding(1).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(borderColor)
+)
+
+type DRD4Record struct {
+	Name             string `json:"name"`
+	VariantCode      string `json:"variant_code"`
+	Nucleotides      string `json:"nucleotides"`
+	Translated       string `json:"translated"`
+	NucleotidesAlign string `json:"nucleotides_align"`
+}
+
+type listItem struct {
+	record DRD4Record
+}
+
+func (i listItem) FilterValue() string {
+	return i.record.VariantCode
+}
+
+func (i listItem) Title() string {
+	aaCount := len(i.record.Translated)
+	pbCount := len(i.record.NucleotidesAlign)
+	return fmt.Sprintf("%s (AA: %d) (PB: %d)", i.record.VariantCode, aaCount, pbCount)
+}
+
+func (i listItem) Description() string {
+	return ""
+}
+
+type mode int
+
+const (
+	modeNucleotides mode = iota
+	modeTranslated
+	modeAlignment
+)
+
+func (m mode) String() string {
+	switch m {
+	case modeNucleotides:
+		return "🧬 Nucleotides"
+	case modeTranslated:
+		return "🧪 Translated"
+	case modeAlignment:
+		return "📐 Alignment"
+	default:
+		return "Unknown"
+	}
+}
 
 type model struct {
-	records            []fasta.FastaRecord
-	cursor             int
-	width              int
-	height             int
-	refIdx             int // index of reference record in records (-1 if none)
-	status             string
-	mu                 sync.Mutex
-	headerOffset       int
-	sequenceOffset     int
-	targetHeaderOffset int
-	animating          bool
+	list          list.Model
+	records       []DRD4Record
+	currentMode   mode
+	showHelp      bool
+	width         int
+	height        int
+	totalRecords  int
+	selectedIndex int
 }
 
-func initialModel(recs []fasta.FastaRecord, refIdx int) *model {
-	return &model{records: recs, cursor: 0, refIdx: refIdx}
+func initialModel() model {
+	// Load data
+	data, err := ioutil.ReadFile("database.json")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var records []DRD4Record
+	if err := json.Unmarshal(data, &records); err != nil {
+		log.Fatal(err)
+	}
+
+	// Create list items
+	items := make([]list.Item, len(records))
+	for i, record := range records {
+		items[i] = listItem{record: record}
+	}
+
+	// Create list
+	l := list.New(items, list.NewDefaultDelegate(), 0, 0)
+	l.Title = "DRD4 Variants"
+	l.SetShowStatusBar(false)
+	l.SetShowPagination(true)
+	l.SetFilteringEnabled(true)
+
+	return model{
+		list:         l,
+		records:      records,
+		currentMode:  modeNucleotides,
+		totalRecords: len(records),
+	}
 }
 
-func (m *model) Init() tea.Cmd { return nil }
+func (m model) Init() tea.Cmd {
+	return nil
+}
 
-type tickMsg struct{}
-
-func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "esc", "ctrl+c":
-			return m, tea.Quit
-		case "j", "down":
-			if m.cursor < len(m.records)-1 {
-				m.cursor++
-				// ensure cursor visible in header viewport (may animate)
-				return m, m.ensureCursorVisible()
-			}
-		case "k", "up":
-			if m.cursor > 0 {
-				m.cursor--
-				return m, m.ensureCursorVisible()
-			}
-		case " ":
-			// page down sequence
-			m.pageSequence(1)
-		case "b":
-			// page up sequence
-			m.pageSequence(-1)
-		case "g":
-			m.cursor = 0
-			return m, m.ensureCursorVisible()
-		case "G":
-			m.cursor = len(m.records) - 1
-			return m, m.ensureCursorVisible()
-		case "a":
-			// run MAFFT on the input file (non-blocking)
-			go func() {
-				m.mu.Lock()
-				m.status = "running mafft..."
-				m.mu.Unlock()
-				if p, err := exec.LookPath("mafft"); err == nil {
-					cmd := exec.Command(p, "--auto", "-")
-					// no stdin provided; this is a placeholder
-					_ = cmd.Start()
-					_ = cmd.Process.Release()
-					time.Sleep(500 * time.Millisecond)
-				}
-				m.mu.Lock()
-				m.status = "mafft started"
-				m.mu.Unlock()
-			}()
-		case "f":
-			// fetch translation for current accession via NCBI (non-blocking)
-			go func(idx int) {
-				acc := ""
-				if idx >= 0 && idx < len(m.records) {
-					fields := strings.Fields(m.records[idx].Header)
-					if len(fields) > 0 {
-						acc = fields[0]
-					}
-				}
-				if acc == "" {
-					m.mu.Lock()
-					m.status = "no accession found for record"
-					m.mu.Unlock()
-					return
-				}
-				m.mu.Lock()
-				m.status = "fetching translation for " + acc
-				m.mu.Unlock()
-				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				defer cancel()
-				res, err := ncbi.FetchTranslations(ctx, []string{acc})
-				if err != nil {
-					m.mu.Lock()
-					m.status = "ncbi fetch error: " + err.Error()
-					m.mu.Unlock()
-					return
-				}
-				if t, ok := res[acc]; ok {
-					m.mu.Lock()
-					m.status = "translation fetched (len=" + fmt.Sprint(len(t)) + ")"
-					m.mu.Unlock()
-				} else {
-					m.mu.Lock()
-					m.status = "no translation found"
-					m.mu.Unlock()
-				}
-			}(m.cursor)
-		case "s":
-			// save current record as JSON
-			go func(idx int) {
-				if idx < 0 || idx >= len(m.records) {
-					m.mu.Lock()
-					m.status = "invalid record index"
-					m.mu.Unlock()
-					return
-				}
-				rec := m.records[idx]
-				b, _ := json.MarshalIndent(rec, "", "  ")
-				fname := fmt.Sprintf("record-%d.json", idx)
-				if err := os.WriteFile(fname, b, 0o644); err != nil {
-					m.mu.Lock()
-					m.status = "save failed: " + err.Error()
-					m.mu.Unlock()
-					return
-				}
-				m.mu.Lock()
-				m.status = "saved " + fname
-				m.mu.Unlock()
-			}(m.cursor)
-		}
-	case tickMsg:
-		// animate headerOffset towards targetHeaderOffset
-		if m.animating {
-			if m.headerOffset < m.targetHeaderOffset {
-				m.headerOffset++
-			} else if m.headerOffset > m.targetHeaderOffset {
-				m.headerOffset--
-			}
-			if m.headerOffset == m.targetHeaderOffset {
-				m.animating = false
-				return m, nil
-			}
-			// continue animation
-			return m, tea.Tick(time.Millisecond*20, func(t time.Time) tea.Msg { return tickMsg{} })
-		}
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+
+		// Calculate list dimensions (left panel takes 1/3 of width)
+		listWidth := msg.Width / 3
+		listHeight := msg.Height - 4 // Account for borders and status
+
+		m.list.SetWidth(listWidth)
+		m.list.SetHeight(listHeight)
+
+		return m, nil
+
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c", "q":
+			return m, tea.Quit
+
+		case "h":
+			m.showHelp = !m.showHelp
+			return m, nil
+
+		case "1":
+			m.currentMode = modeNucleotides
+			return m, nil
+
+		case "2":
+			m.currentMode = modeTranslated
+			return m, nil
+
+		case "3":
+			m.currentMode = modeAlignment
+			return m, nil
+		}
 	}
-	return m, nil
+
+	var cmd tea.Cmd
+	m.list, cmd = m.list.Update(msg)
+	m.selectedIndex = m.list.Index()
+	return m, cmd
 }
 
-// (removed older ensureCursorVisible implementation; new animated version defined below)
+func (m model) View() string {
+	if m.width == 0 {
+		return "Loading..."
+	}
 
-// pageSequence moves the sequence viewport by one page; dir=1 page down, dir=-1 page up
-func (m *model) pageSequence(dir int) {
-	// compute headerHeight similar to renderMain
-	headerHeight := int(float64(m.height) * 0.35)
-	if headerHeight < 3 {
-		headerHeight = 3
+	// Help modal overlay
+	if m.showHelp {
+		return m.renderHelpModal()
 	}
-	maxHeader := m.height - 6
-	if maxHeader < 3 {
-		maxHeader = 3
+
+	// Main layout
+	leftPanel := m.renderLeftPanel()
+	rightPanel := m.renderRightPanel()
+	statusBar := m.renderStatusBar()
+
+	// Create main layout
+	main := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		leftPanel,
+		rightPanel,
+	)
+
+	// Add status bar at bottom
+	return lipgloss.JoinVertical(
+		lipgloss.Left,
+		main,
+		statusBar,
+	)
+}
+
+func (m model) renderLeftPanel() string {
+	listWidth := m.width / 3
+
+	// Style the list container
+	listContainer := containerStyle.
+		Width(listWidth - 2). // Account for padding
+		Height(m.height - 4). // Account for status bar
+		Render(m.list.View())
+
+	return listContainer
+}
+
+func (m model) renderRightPanel() string {
+	rightWidth := (m.width * 2) / 3
+
+	if len(m.records) == 0 {
+		return containerStyle.
+			Width(rightWidth - 2).
+			Height(m.height - 4).
+			Render("No records available")
 	}
-	if headerHeight > maxHeader {
-		headerHeight = maxHeader
+
+	selectedItem := m.list.SelectedItem()
+	if selectedItem == nil {
+		return containerStyle.
+			Width(rightWidth - 2).
+			Height(m.height - 4).
+			Render("No item selected")
 	}
-	// available lines for sequence roughly height - headerHeight - footer
-	footerLines := 2
-	seqLines := m.height - headerHeight - footerLines - 4
-	if seqLines < 3 {
-		seqLines = 3
+
+	record := selectedItem.(listItem).record
+
+	// Header with variant info
+	header := titleStyle.Render(fmt.Sprintf("%s - %s", record.VariantCode, record.Name))
+
+	// Content based on current mode
+	var content string
+	switch m.currentMode {
+	case modeNucleotides:
+		content = m.formatSequence(record.Nucleotides, "Nucleotides")
+	case modeTranslated:
+		content = m.formatSequence(record.Translated, "Translated Sequence")
+	case modeAlignment:
+		content = m.formatSequence(record.NucleotidesAlign, "Nucleotides Alignment")
 	}
-	if dir > 0 {
-		m.sequenceOffset += seqLines
+
+	// Combine header and content
+	panelContent := lipgloss.JoinVertical(
+		lipgloss.Left,
+		header,
+		"",
+		content,
+	)
+
+	return containerStyle.
+		Width(rightWidth - 2).
+		Height(m.height - 4).
+		Render(panelContent)
+}
+
+func (m model) formatSequence(sequence, title string) string {
+	if sequence == "" {
+		return lipgloss.NewStyle().
+			Foreground(mutedColor).
+			Render(fmt.Sprintf("No %s available", strings.ToLower(title)))
+	}
+
+	// Remove line breaks and format for display
+	cleanSequence := strings.ReplaceAll(sequence, "\n", "")
+	cleanSequence = strings.ReplaceAll(cleanSequence, "\r", "")
+
+	// Add title
+	titleStr := lipgloss.NewStyle().
+		Foreground(accentColor).
+		Bold(true).
+		Render(title + ":")
+
+	// Format sequence with wrapping
+	sequenceContent := sequenceStyle.
+		Width(m.width*2/3 - 6). // Account for padding and borders
+		Render(cleanSequence)
+
+	return lipgloss.JoinVertical(
+		lipgloss.Left,
+		titleStr,
+		"",
+		sequenceContent,
+	)
+}
+
+func (m model) renderStatusBar() string {
+	// Left side - navigation info
+	leftInfo := fmt.Sprintf("📊 %d/%d variants", m.selectedIndex+1, m.totalRecords)
+
+	// Center - current mode
+	centerInfo := fmt.Sprintf("Mode: %s", m.currentMode.String())
+
+	// Right side - help hint
+	rightInfo := "Press 'h' for help • 'q' to quit"
+
+	// Calculate spacing
+	totalUsed := len(leftInfo) + len(centerInfo) + len(rightInfo)
+	spacing := m.width - totalUsed - 6 // Account for padding
+
+	var statusContent string
+	if spacing > 0 {
+		leftSpacing := spacing / 2
+		rightSpacing := spacing - leftSpacing
+
+		statusContent = fmt.Sprintf("%s%s%s%s%s",
+			leftInfo,
+			strings.Repeat(" ", leftSpacing),
+			centerInfo,
+			strings.Repeat(" ", rightSpacing),
+			rightInfo,
+		)
 	} else {
-		m.sequenceOffset -= seqLines
+		// Fallback for narrow terminals
+		statusContent = fmt.Sprintf("%s | %s", leftInfo, centerInfo)
 	}
-	if m.sequenceOffset < 0 {
-		m.sequenceOffset = 0
-	}
+
+	return statusBarStyle.
+		Width(m.width).
+		Render(statusContent)
 }
 
-// ensureCursorVisible adjusts headerOffset so the cursor falls within the visible header window
-// and returns a tea.Cmd that animates the header offset when needed.
-func (m *model) ensureCursorVisible() tea.Cmd {
-	// compute header area height as proportion of terminal height, clamped
-	headerHeight := int(float64(m.height) * 0.35)
-	if headerHeight < 3 {
-		headerHeight = 3
-	}
-	maxHeader := m.height - 6
-	if maxHeader < 3 {
-		maxHeader = 3
-	}
-	if headerHeight > maxHeader {
-		headerHeight = maxHeader
-	}
-	// center cursor in viewport when possible for better visibility
-	desired := m.cursor - headerHeight/2
-	if desired < 0 {
-		desired = 0
-	}
-	maxOffset := 0
-	if len(m.records) > headerHeight {
-		maxOffset = len(m.records) - headerHeight
-	}
-	if desired > maxOffset {
-		desired = maxOffset
-	}
-	if desired == m.headerOffset {
-		return nil
-	}
-	m.targetHeaderOffset = desired
-	m.animating = true
-	return tea.Tick(time.Millisecond*20, func(t time.Time) tea.Msg { return tickMsg{} })
-}
+func (m model) renderHelpModal() string {
+	helpContent := `🧬 DRD4 Variants Browser - Help
 
-func renderMain(m *model, mainWidth int) string {
-	var b strings.Builder
-	b.WriteString("Headers:\n")
-	// determine header viewport
-	headerHeight := m.height / 3
-	if headerHeight < 3 {
-		headerHeight = 3
-	}
-	start := m.headerOffset
-	end := start + headerHeight
-	if end > len(m.records) {
-		end = len(m.records)
-	}
-	// indicate truncated top
-	if start > 0 {
-		b.WriteString("...\n")
-	}
-	for i := start; i < end; i++ {
-		r := m.records[i]
-		marker := " "
-		if i == m.cursor {
-			marker = ">"
-		}
-		line := r.Header
-		if len(line) > mainWidth-6 {
-			line = line[:mainWidth-9] + "..."
-		}
-		fmt.Fprintf(&b, "%s %s\n", marker, line)
-	}
-	if end < len(m.records) {
-		b.WriteString("...\n")
-	}
-	b.WriteString("\nSequence:\n")
-	if mainWidth < 4 {
-		mainWidth = 4
-	}
-	if m.cursor >= 0 && m.cursor < len(m.records) {
-		seq := m.records[m.cursor].Sequence
-		// wrap to width (avoid infinite loop)
-		for i := 0; i < len(seq); i += mainWidth {
-			end := i + mainWidth
-			if end > len(seq) {
-				end = len(seq)
-			}
-			b.WriteString(seq[i:end] + "\n")
-		}
-	}
-	return b.String()
-}
+Navigation:
+  ↑/↓, j/k     Navigate list
+  /            Filter variants
+  Enter        Select variant
 
-func renderRef(m *model, refWidth int) string {
-	var b strings.Builder
-	b.WriteString("Reference\n\n")
-	if refWidth < 4 {
-		refWidth = 4
-	}
-	if m.refIdx >= 0 && m.refIdx < len(m.records) {
-		r := m.records[m.refIdx]
-		b.WriteString(r.Header + "\n\n")
-		seq := r.Sequence
-		for i := 0; i < len(seq); i += refWidth {
-			end := i + refWidth
-			if end > len(seq) {
-				end = len(seq)
-			}
-			b.WriteString(seq[i:end] + "\n")
-		}
-	} else {
-		b.WriteString("(no reference found)\n")
-	}
-	return b.String()
-}
+View Modes:
+  1            Show nucleotides
+  2            Show translated sequence  
+  3            Show nucleotides alignment
 
-func (m *model) View() string {
-	gap := 2
-	// Require a valid terminal size
-	if m.width <= 0 || m.height <= 0 {
-		return "Waiting for terminal size..."
-	}
+General:
+  h            Toggle this help
+  q, Ctrl+C    Quit application
 
-	// compute reference column as 30% of width, clamped
-	refWidth := int(float64(m.width) * 0.3)
-	if refWidth < 20 {
-		refWidth = 20
-	}
-	// ensure refWidth leaves space for main column
-	minMain := 20
-	if refWidth > m.width-minMain-gap {
-		refWidth = m.width - minMain - gap
-		if refWidth < 4 {
-			refWidth = 4
-		}
-	}
-	mainWidth := m.width - refWidth - gap
-	if mainWidth < minMain {
-		mainWidth = minMain
-		if mainWidth > m.width-gap {
-			mainWidth = m.width - gap
-		}
-	}
+Current Mode: ` + m.currentMode.String() + `
+Total Variants: ` + fmt.Sprintf("%d", m.totalRecords) + `
+`
 
-	mainStyle := lipgloss.NewStyle().Width(mainWidth).Padding(1).Border(lipgloss.NormalBorder())
-	refStyle := lipgloss.NewStyle().Width(refWidth).Padding(1).Border(lipgloss.NormalBorder()).Align(lipgloss.Center)
+	// Create modal box
+	modalStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(primaryColor).
+		Padding(1, 2).
+		Background(surfaceColor).
+		Foreground(textColor).
+		Width(60).
+		Align(lipgloss.Center)
 
-	// leave padding inside styles; rendering widths subtract padding
-	main := renderMain(m, mainWidth-4)
-	ref := renderRef(m, refWidth-4)
-	status := ""
-	m.mu.Lock()
-	status = m.status
-	m.mu.Unlock()
-	footer := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("a: run mafft • f: fetch translation • s: save record • q: quit   " + status)
+	modal := modalStyle.Render(helpContent)
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, mainStyle.Render(main), lipgloss.NewStyle().Width(gap).Render(""), refStyle.Render(ref)) + "\n" + footer
+	// Center the modal on screen
+	return lipgloss.Place(
+		m.width,
+		m.height,
+		lipgloss.Center,
+		lipgloss.Center,
+		modal,
+	)
 }
 
 func main() {
-	inFlag := flag.String("in", "drd4-tdah.fasta", "input FASTA file")
-	refFlag := flag.String("ref", "", "reference header to display on the right column (substring match)")
-	flag.Parse()
-
-	f, err := os.Open(*inFlag)
-	if err != nil {
-		if os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "input file not found: %s\n", *inFlag)
-			os.Exit(2)
-		}
-		fmt.Fprintf(os.Stderr, "failed to open input: %v\n", err)
-		os.Exit(1)
-	}
-	defer f.Close()
-
-	// Parse FASTA
-	records := fasta.ParseFasta(f)
-	if len(records) == 0 {
-		fmt.Fprintln(os.Stderr, "no FASTA records found")
-		os.Exit(1)
-	}
-
-	// find reference by substring match if provided, else try to find the NM_000797 accession
-	refIdx := -1
-	if *refFlag != "" {
-		for i, r := range records {
-			if strings.Contains(r.Header, *refFlag) {
-				refIdx = i
-				break
-			}
-		}
-	}
-	if refIdx == -1 {
-		for i, r := range records {
-			if strings.HasPrefix(r.Header, "NM_000797.4") || strings.Contains(r.Header, "DRD4") {
-				refIdx = i
-				break
-			}
-		}
-	}
-
-	m := initialModel(records, refIdx)
-	p := tea.NewProgram(m, tea.WithAltScreen())
-	if err := p.Start(); err != nil && err != io.EOF {
-		fmt.Fprintf(os.Stderr, "failed to start TUI: %v\n", err)
+	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		fmt.Printf("Error: %v", err)
 		os.Exit(1)
 	}
 }
