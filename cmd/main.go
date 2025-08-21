@@ -21,6 +21,9 @@ import (
 	"github.com/charmbracelet/log"
 )
 
+// version is the program version. It can be overridden at build time with -ldflags "-X main.version=..."
+var version = "0.1.0"
+
 // ReferenceHeader is the FASTA header used as the canonical reference during merges.
 // Adjust this value to match the header present in your input FASTA when merging.
 const ReferenceHeader = "NM_000797.4 Homo sapiens dopamine receptor D4 (DRD4), mRNA"
@@ -70,11 +73,14 @@ func main() {
 	outputFlag := flag.String("out", "drd4-database.json", "output JSON file path")
 	configFlag := flag.String("config", "", "path to config.json (optional)")
 	externalFlag := flag.Bool("external", false, "enable external translator fallback (transeq/seqkit)")
+	mafftArgs := flag.String("mafft-args", "--auto", "additional arguments to pass to mafft (quoted)")
+	dryRun := flag.Bool("dry-run", false, "perform a dry run without writing outputs or calling external tools")
+	verbose := flag.Bool("verbose", false, "enable verbose (debug) logging")
 	versionFlag := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
 	if *versionFlag {
-		fmt.Println("drd4 version 0.1.0")
+		fmt.Println("drd4", version)
 		return
 	}
 
@@ -132,19 +138,23 @@ func main() {
 	termW := &terminalWriter{w: tw, fd: os.Stderr.Fd()}
 	logger := log.New(termW)
 
-	// apply log level from config (default: info)
-	switch strings.ToLower(cfg.LogLevel) {
-	case "debug":
+	// apply log level from flags/config (flags override config)
+	if *verbose {
 		logger.SetLevel(log.DebugLevel)
-	case "info", "":
-		logger.SetLevel(log.InfoLevel)
-	case "warn", "warning":
-		logger.SetLevel(log.WarnLevel)
-	case "error":
-		logger.SetLevel(log.ErrorLevel)
-	default:
-		logger.SetLevel(log.InfoLevel)
-		logger.Warn("unknown log_level in config.json, defaulting to info", "provided", cfg.LogLevel)
+	} else {
+		switch strings.ToLower(cfg.LogLevel) {
+		case "debug":
+			logger.SetLevel(log.DebugLevel)
+		case "info", "":
+			logger.SetLevel(log.InfoLevel)
+		case "warn", "warning":
+			logger.SetLevel(log.WarnLevel)
+		case "error":
+			logger.SetLevel(log.ErrorLevel)
+		default:
+			logger.SetLevel(log.InfoLevel)
+			logger.Warn("unknown log_level in config.json, defaulting to info", "provided", cfg.LogLevel)
+		}
 	}
 
 	// startup log with non-sensitive config
@@ -198,14 +208,18 @@ func main() {
 
 		// Try to run MAFFT on the original FASTA file to get aligned sequences.
 		alignMap := make(map[string]string)
-		if mpath, err := exec.LookPath("mafft"); err == nil {
+		if *dryRun {
+			logger.Info("dry-run: skipping mafft invocation")
+		} else if mpath, err := exec.LookPath("mafft"); err == nil {
 			logger.Debug("mafft path", "path", mpath)
 			logger.Info("mafft found, running alignment")
 			// run mafft with a 10-minute timeout and capture combined output
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()
 			start := time.Now()
-			out, err := exec.CommandContext(ctx, mpath, "--auto", filename).CombinedOutput()
+			// support passing additional args via --mafft-args (space separated)
+			args := append(strings.Fields(*mafftArgs), filename)
+			out, err := exec.CommandContext(ctx, mpath, args...).CombinedOutput()
 			dur := time.Since(start)
 			if err != nil {
 				logger.Error("mafft failed or timed out", "err", err, "duration_ms", dur.Milliseconds(), "out_size", len(out))
@@ -255,7 +269,9 @@ func main() {
 		protMap := make(map[string]string)
 		if tmpErr == nil && cfg.UseExternalTranslator {
 			// prefer transeq, then seqkit
-			if tpath, err := exec.LookPath("transeq"); err == nil {
+			if *dryRun {
+				logger.Info("dry-run: skipping external translation step")
+			} else if tpath, err := exec.LookPath("transeq"); err == nil {
 				logger.Info("using external translator", "tool", "transeq")
 				logger.Debug("transeq path", "path", tpath)
 				// run transeq with timeout and combined output
@@ -420,10 +436,14 @@ func main() {
 			outPath = cfg.OutputJSON
 		}
 
-		if err := os.WriteFile(outPath, jsonData, 0o644); err != nil {
-			logger.Error("failed to write output JSON", "path", outPath, "err", err)
+		if *dryRun {
+			logger.Info("dry-run: would write output JSON", "path", outPath, "variants", len(variants))
 		} else {
-			logger.Info("wrote output JSON", "path", outPath, "variants", len(variants))
+			if err := os.WriteFile(outPath, jsonData, 0o644); err != nil {
+				logger.Error("failed to write output JSON", "path", outPath, "err", err)
+			} else {
+				logger.Info("wrote output JSON", "path", outPath, "variants", len(variants))
+			}
 		}
 	} else {
 		fmt.Println(content)
