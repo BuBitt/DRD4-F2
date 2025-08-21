@@ -50,6 +50,19 @@ func defaultCachePath() string {
 	return filepath.Join(os.TempDir(), "drd4_ncbi_cache.json")
 }
 
+// SetCacheFilePath sets the file path used for the cache (for testing or config).
+func SetCacheFilePath(p string) {
+	cacheFilePath = p
+	// reload on next access
+	cacheLoaded = false
+}
+
+// SetCacheTTLSeconds sets the cache TTL via environment-like string (for tests/config).
+func SetCacheTTLSeconds(ttl int64) {
+	// set via env is supported in cacheTTL(); as a simple override we mutate NCBI_CACHE_TTL_SECONDS env
+	os.Setenv("NCBI_CACHE_TTL_SECONDS", fmt.Sprintf("%d", ttl))
+}
+
 func loadCache() {
 	cacheMu.Lock()
 	defer cacheMu.Unlock()

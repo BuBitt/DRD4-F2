@@ -1,0 +1,43 @@
+# Binaries
+/drd4
+/tmp/drd4.bin
+
+# Build output
+/bin/
+/obj/
+
+# Vendor
+/vendor/
+
+# Go workspace
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Dependency directories
+pkg/
+
+# Editor/IDE files
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+
+# Environment files
+.env
+
+# NCBI cache
+*.json
+drd4_ncbi_cache.json
+/.cache/
+
+# Test output
+*.out
+
+# Go test cache
+testdata/
+
+# ignore generated protobufs or similar (if any)
+**/*.pb.go

@@ -8,6 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/charmbracelet/log"
+	"github.com/joho/godotenv"
+
+	"drd4/internal/config"
 	"drd4/internal/fasta"
 	"drd4/internal/ncbi"
 )
@@ -24,7 +28,49 @@ func main() {
 	}
 	content := string(data)
 
+	// load .env if present so env: secrets and direct env vars are available
+	_ = godotenv.Load()
+
+	// load config (optional file ./config.json)
+	cfg, _ := config.LoadConfig("")
+
+	// configure logger output
+	var loggerOut = os.Stderr
+	if cfg.LogFile != "" {
+		if f, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
+			loggerOut = f
+			defer f.Close()
+		}
+	}
+	logger := log.New(loggerOut)
+
+	// allow config to override input filename
+	if cfg.InputFasta != "" {
+		filename = cfg.InputFasta
+	}
+
+	// apply ncbi config
+	if cfg.NcbiCachePath != "" {
+		ncbi.SetCacheFilePath(cfg.NcbiCachePath)
+	}
+	if cfg.NcbiApiKey != "" {
+		if key, err := config.ResolveSecret(cfg.NcbiApiKey); err != nil {
+			logger.Warn("failed to resolve ncbi api key", "err", err)
+		} else if key != "" {
+			os.Setenv("NCBI_API_KEY", key)
+		}
+	}
+	if cfg.NcbiCacheTTLSecs > 0 {
+		ncbi.SetCacheTTLSeconds(cfg.NcbiCacheTTLSecs)
+	}
+
 	if filepath.Ext(filename) == ".fasta" {
+		data, err = os.ReadFile(filename)
+		if err != nil {
+			logger.Fatal("failed to read input fasta", "path", filename, "err", err)
+		}
+		content = string(data)
+
 		records := fasta.ParseFasta(strings.NewReader(content))
 
 		// Try to run MAFFT on the original FASTA file to get aligned sequences.
@@ -33,7 +79,7 @@ func main() {
 			cmd := exec.Command("mafft", "--auto", filename)
 			out, err := cmd.Output()
 			if err != nil {
-				fmt.Fprintln(os.Stderr, "mafft failed:", err)
+				logger.Error("mafft failed", "err", err)
 			} else {
 				aligned := fasta.ParseFasta(strings.NewReader(string(out)))
 				for _, a := range aligned {
@@ -41,7 +87,7 @@ func main() {
 				}
 			}
 		} else {
-			fmt.Fprintln(os.Stderr, "mafft not found in PATH; nucleotides_align field will contain unaligned sequence")
+			logger.Warn("mafft not found in PATH; nucleotides_align field will contain unaligned sequence")
 		}
 
 		type Variant struct {
@@ -66,7 +112,7 @@ func main() {
 			tmp.Close()
 			defer os.Remove(tmp.Name())
 		} else {
-			fmt.Fprintln(os.Stderr, "warning: cannot create temp file for aligned FASTA:", tmpErr)
+			logger.Error("cannot create temp file for aligned FASTA", "err", tmpErr)
 		}
 
 		// translate using external tool: prefer transeq (EMBOSS), then seqkit
@@ -76,7 +122,7 @@ func main() {
 				cmd := exec.Command(path, "-sequence", tmp.Name(), "-outseq", "-")
 				out, err := cmd.Output()
 				if err != nil {
-					fmt.Fprintln(os.Stderr, "transeq failed:", err)
+					logger.Error("transeq failed", "err", err)
 				} else {
 					prots := fasta.ParseFasta(strings.NewReader(string(out)))
 					for _, p := range prots {
@@ -87,7 +133,7 @@ func main() {
 				cmd := exec.Command(path, "translate", "-w", "0", tmp.Name())
 				out, err := cmd.Output()
 				if err != nil {
-					fmt.Fprintln(os.Stderr, "seqkit translate failed:", err)
+					logger.Error("seqkit translate failed", "err", err)
 				} else {
 					prots := fasta.ParseFasta(strings.NewReader(string(out)))
 					for _, p := range prots {
@@ -95,7 +141,7 @@ func main() {
 					}
 				}
 			} else {
-				fmt.Fprintln(os.Stderr, "no external translator found (transeq or seqkit); translated field will be omitted")
+				logger.Warn("no external translator found (transeq or seqkit); translated field will be omitted")
 			}
 		}
 
@@ -116,7 +162,7 @@ func main() {
 			// Prefer translation from GenBank (NCBI) using the accession (first token of header)
 			if acc != "" {
 				if gb, err := ncbi.FetchTranslationFromGenBank(acc); err != nil {
-					fmt.Fprintln(os.Stderr, "ncbi fetch error for", acc, ":", err)
+					logger.Warn("ncbi fetch error", "acc", acc, "err", err)
 				} else if gb != "" {
 					translation = gb
 				}
@@ -138,9 +184,18 @@ func main() {
 		}
 		jsonData, err := json.MarshalIndent(variants, "", "  ")
 		if err != nil {
-			panic(err)
+			logger.Fatal("json marshal failed", "err", err)
 		}
-		fmt.Println(string(jsonData))
+		outPath := "drd4-database.json"
+		if cfg.OutputJSON != "" {
+			outPath = cfg.OutputJSON
+		}
+
+		if err := os.WriteFile(outPath, jsonData, 0o644); err != nil {
+			logger.Error("failed to write output JSON", "path", outPath, "err", err)
+		} else {
+			logger.Info("wrote output JSON", "path", outPath)
+		}
 	} else {
 		fmt.Println(content)
 	}
