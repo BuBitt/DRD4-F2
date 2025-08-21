@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -64,15 +65,49 @@ func (tw *terminalWriter) Write(p []byte) (int, error) { return tw.w.Write(p) }
 func (tw *terminalWriter) Fd() uintptr { return tw.fd }
 
 func main() {
-	filename := "drd4-tdah.fasta"
-	data, err := os.ReadFile(filename)
-	if err != nil {
-		panic(err)
-	}
-	content := string(data)
+	// CLI flags
+	inputFlag := flag.String("in", "drd4-tdah.fasta", "input FASTA file path")
+	outputFlag := flag.String("out", "drd4-database.json", "output JSON file path")
+	configFlag := flag.String("config", "", "path to config.json (optional)")
+	externalFlag := flag.Bool("external", false, "enable external translator fallback (transeq/seqkit)")
+	versionFlag := flag.Bool("version", false, "print version and exit")
+	flag.Parse()
 
-	// load config (optional file ./config.json)
-	cfg, _ := config.LoadConfig("")
+	if *versionFlag {
+		fmt.Println("drd4 version 0.1.0")
+		return
+	}
+
+	// load config (optional file)
+	cfg, _ := config.LoadConfig(*configFlag)
+
+	// merge CLI flags into config (flags override config when provided)
+	if *inputFlag != "" {
+		cfg.InputFasta = *inputFlag
+	}
+	if *outputFlag != "" {
+		cfg.OutputJSON = *outputFlag
+	}
+	if *externalFlag {
+		cfg.UseExternalTranslator = true
+	}
+
+	// initialize file vars used by legacy logic
+	filename := ""
+	var data []byte
+	var err error
+	var content string
+	if cfg.InputFasta != "" {
+		filename = cfg.InputFasta
+	} else if *inputFlag != "" {
+		filename = *inputFlag
+	}
+	if filename != "" {
+		data, err = os.ReadFile(filename)
+		if err == nil {
+			content = string(data)
+		}
+	}
 
 	// configure logger output
 	var loggerOut io.Writer = os.Stderr
