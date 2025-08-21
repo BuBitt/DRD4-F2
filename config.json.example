@@ -1,0 +1,10 @@
+{
+    "input_fasta": "drd4-tdah.fasta",
+    "output_json": "drd4-database.json",
+    "log_file": "last-run.log",
+    "log_level": "debug",
+    "ncbi_cache_path": "./ncbi_cache",
+    "ncbi_api_key": "YOUR_API_KEY",
+    "ncbi_cache_ttl_seconds": 604800,
+    "use_external_translator": false
+}
