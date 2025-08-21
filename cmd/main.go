@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"drd4/internal/fasta"
+	"drd4/internal/ncbi"
 )
 
 // Define aqui o cabeçalho da sequência de referência que será usada para o merge.
@@ -112,8 +113,19 @@ func main() {
 			}
 
 			translation := ""
-			if t, ok := protMap[record.Header]; ok {
-				translation = t
+			// Prefer translation from GenBank (NCBI) using the accession (first token of header)
+			if acc != "" {
+				if gb, err := ncbi.FetchTranslationFromGenBank(acc); err != nil {
+					fmt.Fprintln(os.Stderr, "ncbi fetch error for", acc, ":", err)
+				} else if gb != "" {
+					translation = gb
+				}
+			}
+			// Fallback: use translation from external translator if GenBank not available
+			if translation == "" {
+				if t, ok := protMap[record.Header]; ok {
+					translation = t
+				}
 			}
 
 			variants = append(variants, Variant{
