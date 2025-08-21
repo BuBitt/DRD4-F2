@@ -17,6 +17,7 @@ import (
 	"drd4/internal/config"
 	"drd4/internal/fasta"
 	"drd4/internal/ncbi"
+	"drd4/internal/translator"
 
 	"github.com/charmbracelet/log"
 )
@@ -265,56 +266,12 @@ func main() {
 			logger.Error("cannot create temp file for aligned FASTA", "err", tmpErr)
 		}
 
-		// translate using external tool: prefer transeq (EMBOSS), then seqkit
-		protMap := make(map[string]string)
-		if tmpErr == nil && cfg.UseExternalTranslator {
-			// prefer transeq, then seqkit
-			if *dryRun {
-				logger.Info("dry-run: skipping external translation step")
-			} else if tpath, err := exec.LookPath("transeq"); err == nil {
-				logger.Info("using external translator", "tool", "transeq")
-				logger.Debug("transeq path", "path", tpath)
-				// run transeq with timeout and combined output
-				ctxT, cancelT := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancelT()
-				cmd := exec.CommandContext(ctxT, tpath, "-sequence", tmp.Name(), "-outseq", "-")
-				logger.Debug("running command", "cmd", strings.Join(cmd.Args, " "))
-				out, err := cmd.CombinedOutput()
-				if err != nil {
-					logger.Error("transeq failed", "err", err, "out_size", len(out))
-				} else {
-					logger.Debug("transeq output size", "bytes", len(out))
-					prots := fasta.ParseFasta(strings.NewReader(string(out)))
-					for _, p := range prots {
-						protMap[p.Header] = p.Sequence
-					}
-					logger.Info("transeq produced proteins", "count", len(prots))
-				}
-			} else if tpath, err := exec.LookPath("seqkit"); err == nil {
-				logger.Info("using external translator", "tool", "seqkit")
-				logger.Debug("seqkit path", "path", tpath)
-				// run seqkit with timeout and combined output
-				ctxS, cancelS := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancelS()
-				cmd := exec.CommandContext(ctxS, tpath, "translate", "-w", "0", tmp.Name())
-				logger.Debug("running command", "cmd", strings.Join(cmd.Args, " "))
-				out, err := cmd.CombinedOutput()
-				if err != nil {
-					logger.Error("seqkit translate failed", "err", err, "out_size", len(out))
-				} else {
-					logger.Debug("seqkit output size", "bytes", len(out))
-					prots := fasta.ParseFasta(strings.NewReader(string(out)))
-					for _, p := range prots {
-						protMap[p.Header] = p.Sequence
-					}
-					logger.Info("seqkit produced proteins", "count", len(prots))
-				}
-			} else {
-				logger.Warn("no external translator found (transeq or seqkit); translated field will be omitted")
-			}
-		} else if !cfg.UseExternalTranslator {
-			logger.Info("external translator disabled by config; skipping translation step")
-		}
+		// We no longer perform a bulk translation step here.
+		// Translation will be resolved from NCBI (FetchTranslations). If a given
+		// accession has no translation in GenBank, and external translation is
+		// enabled, the program will invoke `seqkit translate` for that specific
+		// variant only. This keeps translation responsibility outside the TUI
+		// and avoids embedding biological translation logic in Go code.
 
 		for _, record := range records {
 			alignSeq := record.Sequence
@@ -414,19 +371,51 @@ func main() {
 		close(results)
 		wg.Wait()
 
-		// fill translations into variants, fallback to protMap if needed
+		// fill translations into variants. If NCBI has no translation for a
+		// specific accession and external translation is enabled, invoke
+		// `seqkit translate` for that single variant only. This keeps the
+		// heavy translation work off the TUI and uses well-tested external
+		// tools for the biological translation.
+		var seqkitPath string
+		if cfg.UseExternalTranslator && !*dryRun {
+			if sp, err := exec.LookPath("seqkit"); err == nil {
+				seqkitPath = sp
+				logger.Info("seqkit available for per-variant translation", "path", seqkitPath)
+			} else {
+				logger.Info("seqkit not found in PATH; per-variant external translation disabled")
+			}
+		} else if *dryRun {
+			logger.Info("dry-run: skipping per-variant external translation")
+		}
+
+		ncbiCount := 0
+		seqkitCount := 0
+		// First assign NCBI translations and collect records that need seqkit
+		missingForSeqkit := []translator.TranslatorRecord{}
 		for i := range variants {
 			acc := variants[i].VariantCode
 			if acc != "" {
 				if t, ok := merged[acc]; ok && t != "" {
 					variants[i].Translated = t
+					ncbiCount++
 					continue
 				}
 			}
-			if t, ok := protMap[variants[i].Name]; ok {
-				variants[i].Translated = t
+			if seqkitPath != "" {
+				missingForSeqkit = append(missingForSeqkit, translator.TranslatorRecord{Index: i, Header: variants[i].Name, Sequence: variants[i].Nucleotides})
 			}
 		}
+
+		if len(missingForSeqkit) > 0 && seqkitPath != "" {
+			translatedMap, _ := translator.TranslateMissing(missingForSeqkit, seqkitPath, 15*time.Second)
+			for idx, seq := range translatedMap {
+				variants[idx].Translated = seq
+				seqkitCount++
+			}
+		}
+
+		// Log counts of translation sources
+		logger.Info("translation sources summary", "ncbi_translations", ncbiCount, "seqkit_translations", seqkitCount)
 		jsonData, err := json.MarshalIndent(variants, "", "  ")
 		if err != nil {
 			logger.Fatal("json marshal failed", "err", err)
