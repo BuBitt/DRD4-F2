@@ -323,8 +323,9 @@ func main() {
 
 		logger.Info("starting ncbi batch lookup", "accessions", len(accessions), "concurrency", concurrency, "qps", qps, "batch_size", batchSize)
 
-		// simple rate limiter: tick channel at qps
-		tick := time.Tick(time.Second / time.Duration(qps))
+		// simple rate limiter: ticker at qps (use NewTicker to avoid leaking goroutine)
+		ticker := time.NewTicker(time.Second / time.Duration(qps))
+		defer ticker.Stop()
 
 		// worker pool over batches
 		tasks := make(chan []string)
@@ -336,7 +337,7 @@ func main() {
 			go func() {
 				defer wg.Done()
 				for batch := range tasks {
-					<-tick // rate limit per batch
+					<-ticker.C // rate limit per batch
 					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 					m, err := ncbi.FetchTranslations(ctx, batch)
 					cancel()

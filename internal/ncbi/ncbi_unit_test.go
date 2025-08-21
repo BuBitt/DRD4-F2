@@ -2,7 +2,7 @@ package ncbi
 
 import (
 	"context"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -37,7 +37,7 @@ func TestFetchTranslationFromGenBank_XML(t *testing.T) {
 	httpClient = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: 200,
-			Body:       ioutil.NopCloser(strings.NewReader(xml)),
+			Body:       io.NopCloser(strings.NewReader(xml)),
 			Header:     make(http.Header),
 		}, nil
 	})}
@@ -105,7 +105,7 @@ func TestFetchTranslations_BatchMapping(t *testing.T) {
 	httpClient = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: 200,
-			Body:       ioutil.NopCloser(strings.NewReader(xml)),
+			Body:       io.NopCloser(strings.NewReader(xml)),
 			Header:     make(http.Header),
 		}, nil
 	})}
@@ -151,9 +151,9 @@ func TestFetchTranslations_RetryAndRetryAfter(t *testing.T) {
 		if calls == 1 {
 			h := make(http.Header)
 			h.Set("Retry-After", "1")
-			return &http.Response{StatusCode: 429, Body: ioutil.NopCloser(strings.NewReader("")), Header: h}, nil
+			return &http.Response{StatusCode: 429, Body: io.NopCloser(strings.NewReader("")), Header: h}, nil
 		}
-		return &http.Response{StatusCode: 200, Body: ioutil.NopCloser(strings.NewReader(xml)), Header: make(http.Header)}, nil
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(xml)), Header: make(http.Header)}, nil
 	})}
 
 	tmp := t.TempDir()

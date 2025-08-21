@@ -1,5 +1,8 @@
 package fasta
 
+// Package fasta contains minimal helpers to parse FASTA formatted data used
+// by the project. It intentionally keeps parsing simple and conservative.
+
 import (
 	"bufio"
 	"io"

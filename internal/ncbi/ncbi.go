@@ -1,5 +1,9 @@
 package ncbi
 
+// Package ncbi provides a small helper for fetching GenBank translations
+// from NCBI's efetch service with a file-backed cache. The package exposes
+// functions for batched translations, cache control, and metadata retrieval.
+
 import (
 	"context"
 	"encoding/json"

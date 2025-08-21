@@ -1,5 +1,10 @@
 package translator
 
+// Package translator provides a thin wrapper around external translation
+// tools (e.g., seqkit) to translate single FASTA records to protein
+// sequences. The package keeps the translation logic outside the TUI and
+// main control flow.
+
 import (
 	"context"
 	"drd4/internal/fasta"
