@@ -41,15 +41,15 @@ func main() {
 				}
 			}
 		} else {
-			fmt.Fprintln(os.Stderr, "mafft not found in PATH; align field will contain unaligned sequence")
+			fmt.Fprintln(os.Stderr, "mafft not found in PATH; nucleotides_align field will contain unaligned sequence")
 		}
 
 		type Variant struct {
-			Name        string `json:"name"`
-			VariantCode string `json:"variant_code"`
-			CDS         string `json:"cds"`
-			Align       string `json:"align"`
-			Translated  string `json:"translated,omitempty"`
+			Name             string `json:"name"`
+			VariantCode      string `json:"variant_code"`
+			Nucleotides      string `json:"nucleotides"`
+			Translated       string `json:"translated,omitempty"`
+			NucleotidesAlign string `json:"nucleotides_align"`
 		}
 		var variants []Variant
 
@@ -129,11 +129,11 @@ func main() {
 			}
 
 			variants = append(variants, Variant{
-				Name:        record.Header,
-				VariantCode: acc,
-				CDS:         record.Sequence,
-				Align:       alignSeq,
-				Translated:  translation,
+				Name:             record.Header,
+				VariantCode:      acc,
+				Nucleotides:      record.Sequence,
+				Translated:       translation,
+				NucleotidesAlign: alignSeq,
 			})
 		}
 		jsonData, err := json.MarshalIndent(variants, "", "  ")
