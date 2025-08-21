@@ -137,6 +137,10 @@ type model struct {
 	height        int
 	totalRecords  int
 	selectedIndex int
+	// right panel focus/scroll state
+	rightFocused      bool
+	rightScroll       int
+	rightContentLines []string
 }
 
 func initialModel() model {
@@ -192,7 +196,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		switch msg.String() {
+		k := msg.String()
+		// When right panel is focused, intercept up/down/left/right for scrolling
+		if m.rightFocused {
+			switch k {
+			case "up", "k":
+				if m.rightScroll > 0 {
+					m.rightScroll--
+				}
+				return m, nil
+			case "down", "j":
+				// compute max scroll
+				max := 0
+				if len(m.rightContentLines) > 0 {
+					max = len(m.rightContentLines) - (m.height - 6)
+					if max < 0 {
+						max = 0
+					}
+				}
+				if m.rightScroll < max {
+					m.rightScroll++
+				}
+				return m, nil
+			case "left":
+				m.rightFocused = false
+				return m, nil
+			}
+		}
+
+		switch k {
 		case "ctrl+c", "q":
 			return m, tea.Quit
 
@@ -210,6 +242,48 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "3":
 			m.currentMode = modeAlignment
+			return m, nil
+
+		case "right":
+			// focus right panel
+			m.rightFocused = true
+			m.rightScroll = 0
+			// prepare content lines for scrolling
+			sel := m.list.SelectedItem()
+			if sel != nil {
+				rec := sel.(listItem).record
+				// build lines from header, meta and content
+				lines := []string{}
+				lines = append(lines, fmt.Sprintf("%s - %s", rec.VariantCode, rec.Name))
+				src := rec.TranslationSource
+				if src == "" {
+					src = "unknown"
+				}
+				lines = append(lines, fmt.Sprintf("Source: %s    PB: %d    AA: %d", src, rec.PBCount, rec.AACount))
+				// add sequence content depending on mode
+				var seqText string
+				switch m.currentMode {
+				case modeNucleotides:
+					seqText = rec.Nucleotides
+				case modeTranslated:
+					seqText = rec.Translated
+				case modeAlignment:
+					seqText = rec.NucleotidesAlign
+				}
+				// split into wrapped lines by width
+				wrapWidth := (m.width*2)/3 - 8
+				if wrapWidth < 20 {
+					wrapWidth = 20
+				}
+				for _, ln := range strings.Split(seqText, "\n") {
+					for len(ln) > wrapWidth {
+						lines = append(lines, ln[:wrapWidth])
+						ln = ln[wrapWidth:]
+					}
+					lines = append(lines, ln)
+				}
+				m.rightContentLines = lines
+			}
 			return m, nil
 		}
 	}
@@ -314,15 +388,47 @@ func (m model) renderRightPanel() string {
 
 	metaStr := label.Render("Source: ") + srcColored + label.Render("    ") + pbColored + label.Render("    ") + aaColored
 
-	// Content based on current mode
+	// Content based on current mode. If right panel is focused we render
+	// the prepared rightContentLines and honor rightScroll (visible window).
 	var content string
-	switch m.currentMode {
-	case modeNucleotides:
-		content = m.formatSequence(record.Nucleotides, "Nucleotides")
-	case modeTranslated:
-		content = m.formatSequence(record.Translated, "Translated Sequence")
-	case modeAlignment:
-		content = m.formatSequence(record.NucleotidesAlign, "Nucleotides Alignment")
+	if m.rightFocused && len(m.rightContentLines) > 0 {
+		// Determine visible rows for the right panel. Keep parity with Update()
+		// which used (m.height - 6) as the visible area when computing max scroll.
+		visible := m.height - 6
+		if visible < 3 {
+			visible = 3
+		}
+
+		// Clamp scroll
+		if m.rightScroll < 0 {
+			m.rightScroll = 0
+		}
+
+		start := m.rightScroll
+		end := start + visible
+		if start > len(m.rightContentLines) {
+			start = len(m.rightContentLines)
+		}
+		if end > len(m.rightContentLines) {
+			end = len(m.rightContentLines)
+		}
+
+		visibleSlice := strings.Join(m.rightContentLines[start:end], "\n")
+
+		// Render visible slice inside the same sequenceStyle used elsewhere,
+		// constraining the width to the right panel width minus padding.
+		content = sequenceStyle.
+			Width(rightWidth - 6).
+			Render(visibleSlice)
+	} else {
+		switch m.currentMode {
+		case modeNucleotides:
+			content = m.formatSequence(record.Nucleotides, "Nucleotides")
+		case modeTranslated:
+			content = m.formatSequence(record.Translated, "Translated Sequence")
+		case modeAlignment:
+			content = m.formatSequence(record.NucleotidesAlign, "Nucleotides Alignment")
+		}
 	}
 
 	// Combine header and content

@@ -426,9 +426,14 @@ func main() {
 			for idx, seq := range translatedMap {
 				variants[idx].Translated = seq
 				variants[idx].TranslationSource = "seqkit"
-				// seqkit produced protein sequence; record AA count and 0 for PB
+				// seqkit produced protein sequence; record AA count
 				variants[idx].AACount = len(seq)
-				variants[idx].PBCount = 0
+				// set PB to nucleotide length when available
+				if variants[idx].NucleotidesAlign != "" {
+					variants[idx].PBCount = len(variants[idx].NucleotidesAlign)
+				} else {
+					variants[idx].PBCount = len(variants[idx].Nucleotides)
+				}
 				seqkitCount++
 				seqkitTotalAA += len(seq)
 			}
