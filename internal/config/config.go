@@ -5,6 +5,8 @@ import (
 	"os"
 )
 
+// Config holds runtime configuration loaded from a JSON file.
+// Fields map to keys expected in `config.json`.
 type Config struct {
 	InputFasta            string `json:"input_fasta"`
 	OutputJSON            string `json:"output_json"`
@@ -19,8 +21,9 @@ type Config struct {
 	UseExternalTranslator bool   `json:"use_external_translator"`
 }
 
-// LoadConfig loads a JSON config from the given path. If path is empty, looks for ./config.json.
-// In config-only mode, secrets must be provided as literal values in config.json.
+// LoadConfig loads configuration from the provided JSON file path.
+// If path is empty, it will try to read `./config.json`.
+// When the file does not exist, LoadConfig returns a Config with zero values.
 func LoadConfig(path string) (*Config, error) {
 	if path == "" {
 		path = "config.json"

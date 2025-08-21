@@ -6,11 +6,14 @@ import (
 	"strings"
 )
 
+// FastaRecord represents a single FASTA record (header and sequence).
 type FastaRecord struct {
 	Header   string
 	Sequence string
 }
 
+// ParseFasta reads FASTA records from r and returns a slice of FastaRecord.
+// Lines beginning with '>' denote headers; sequence lines are concatenated.
 func ParseFasta(r io.Reader) []FastaRecord {
 	scanner := bufio.NewScanner(r)
 	var records []FastaRecord
