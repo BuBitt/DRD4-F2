@@ -1,9 +1,12 @@
 package ncbi
 
 import (
+	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,7 +16,26 @@ import (
 )
 
 // httpClient performs requests; tests may replace it with a mock transport.
-var httpClient = &http.Client{Timeout: 20 * time.Second}
+var httpClient *http.Client
+
+func init() {
+	tr := &http.Transport{
+		MaxIdleConns:        200,
+		MaxIdleConnsPerHost: 50,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+	}
+	httpClient = &http.Client{Transport: tr, Timeout: 30 * time.Second}
+
+	// start background cache flusher
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			saveCache()
+		}
+	}()
+}
 
 // Cache structures
 type cachedEntry struct {
@@ -81,10 +103,16 @@ func loadCache() {
 }
 
 func saveCache() {
+	// snapshot under lock and write without holding lock
 	cacheMu.RLock()
-	defer cacheMu.RUnlock()
+	snap := make(map[string]cachedEntry, len(cache))
+	for k, v := range cache {
+		snap[k] = v
+	}
+	cacheMu.RUnlock()
+
 	path := defaultCachePath()
-	b, err := json.MarshalIndent(cache, "", "  ")
+	b, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
 		return
 	}
@@ -114,34 +142,45 @@ func setCached(acc, tr string) {
 	cacheMu.Lock()
 	cache[acc] = cachedEntry{Translation: tr, RetrievedAt: time.Now().Unix()}
 	cacheMu.Unlock()
-	saveCache()
+	// do not block; background goroutine flushes periodically
 }
 
-// FetchTranslationFromGenBank fetches the GenBank record (XML) for the given
-// nucleotide accession and extracts the first CDS translation found. Returns
-// empty string if not found.
-func FetchTranslationFromGenBank(accession string) (string, error) {
-	if accession == "" {
-		return "", nil
+// FetchTranslations fetches translations for multiple accessions using a single efetch call
+// and returns a map accession->translation. It uses xml.Decoder so it's streaming and robust.
+func FetchTranslations(ctx context.Context, accessions []string) (map[string]string, error) {
+	res := make(map[string]string)
+	if len(accessions) == 0 {
+		return res, nil
+	}
+	// check cache first and collect missing
+	var missing []string
+	for _, a := range accessions {
+		if v, ok := getCached(a); ok {
+			res[a] = v
+		} else {
+			missing = append(missing, a)
+		}
+	}
+	if len(missing) == 0 {
+		return res, nil
 	}
 
-	// check cache first
-	if v, ok := getCached(accession); ok {
-		return v, nil
-	}
-
-	base := "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=%s&rettype=gb&retmode=xml"
+	base := "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&rettype=gb&retmode=xml"
 	apiKey := os.Getenv("NCBI_API_KEY")
 	if apiKey != "" {
 		base += "&api_key=" + apiKey
 	}
-	url := fmt.Sprintf(base, accession)
+
+	// batch all missing in one call (NCBI supports comma-separated ids)
+	ids := strings.Join(missing, ",")
+	url := fmt.Sprintf(base+"&id=%s", ids)
 
 	var lastErr error
-	for attempt := 1; attempt <= 3; attempt++ {
-		req, err := http.NewRequest("GET", url, nil)
+	for attempt := 1; attempt <= 4; attempt++ {
+		// respect context
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
-			return "", err
+			return res, err
 		}
 		req.Header.Set("User-Agent", "drd4-fetcher/1.0 (https://example)")
 		resp, err := httpClient.Do(req)
@@ -150,51 +189,101 @@ func FetchTranslationFromGenBank(accession string) (string, error) {
 		} else {
 			defer resp.Body.Close()
 			if resp.StatusCode == 200 {
-				data, err := io.ReadAll(resp.Body)
-				if err != nil {
-					return "", err
+				// stream-parse XML
+				dec := xml.NewDecoder(resp.Body)
+				var currentAcc string
+				var lastQualifierName string
+				var collected []string
+				for {
+					tk, err := dec.Token()
+					if err != nil {
+						if err == io.EOF {
+							break
+						}
+						lastErr = err
+						break
+					}
+					switch el := tk.(type) {
+					case xml.StartElement:
+						if el.Name.Local == "GBSeq_accession-version" || el.Name.Local == "GBSeq_locus" || el.Name.Local == "GBSeq_primary-accession" {
+							// read accession text
+							var accText string
+							_ = dec.DecodeElement(&accText, &el)
+							currentAcc = strings.TrimSpace(accText)
+						} else if el.Name.Local == "GBQualifier_name" {
+							var name string
+							_ = dec.DecodeElement(&name, &el)
+							lastQualifierName = strings.TrimSpace(name)
+						} else if el.Name.Local == "GBQualifier_value" {
+							var val string
+							_ = dec.DecodeElement(&val, &el)
+							if lastQualifierName == "translation" {
+								tr := strings.ReplaceAll(val, "\n", "")
+								tr = strings.ReplaceAll(tr, " ", "")
+								if currentAcc != "" {
+									res[currentAcc] = tr
+									setCached(currentAcc, tr)
+								} else {
+									// no accession element found for this translation; collect it
+									collected = append(collected, tr)
+								}
+							}
+						}
+					}
 				}
-				text := string(data)
-
-				// XML-aware naive extraction: look for the qualifier name "translation"
-				// then extract the next <GBQualifier_value>...</GBQualifier_value>
-				needle := "<GBQualifier_name>translation</GBQualifier_name>"
-				i := strings.Index(text, needle)
-				if i == -1 {
-					return "", nil
+				// if no accession-based mappings found but we have collected translations
+				// and the request was for a single accession, assign the first collected translation
+				if len(res) == 0 && len(collected) > 0 && len(missing) == 1 {
+					res[missing[0]] = collected[0]
+					setCached(missing[0], collected[0])
 				}
-				// find the next value tag after the name
-				valOpen := "<GBQualifier_value>"
-				valIdx := strings.Index(text[i:], valOpen)
-				if valIdx == -1 {
-					return "", nil
-				}
-				start := i + valIdx + len(valOpen)
-				endTag := "</GBQualifier_value>"
-				end := strings.Index(text[start:], endTag)
-				if end == -1 {
-					return "", nil
-				}
-				translation := text[start : start+end]
-				// Cleanup whitespace/newlines
-				translation = strings.ReplaceAll(translation, "\n", "")
-				translation = strings.ReplaceAll(translation, " ", "")
-				// save to cache (synchronous)
-				setCached(accession, translation)
-				return translation, nil
+				return res, nil
 			}
 			if resp.StatusCode == 429 {
 				lastErr = fmt.Errorf("ncbi efetch returned 429")
-				time.Sleep(time.Duration(attempt*500) * time.Millisecond)
+				// try to respect Retry-After header
+				if ra := resp.Header.Get("Retry-After"); ra != "" {
+					if s, err := time.ParseDuration(ra + "s"); err == nil {
+						time.Sleep(s)
+					}
+				}
+				// exponential backoff with jitter
+				backoff := time.Duration((1<<attempt))*200*time.Millisecond + time.Duration(rand.Intn(300))*time.Millisecond
+				time.Sleep(backoff)
 				continue
 			}
 			body, _ := io.ReadAll(resp.Body)
-			return "", fmt.Errorf("ncbi efetch returned status %d: %s", resp.StatusCode, string(body))
+			return res, fmt.Errorf("ncbi efetch returned status %d: %s", resp.StatusCode, string(body))
 		}
-		time.Sleep(time.Duration(attempt*300) * time.Millisecond)
+		// transient network error -> backoff with jitter
+		time.Sleep(time.Duration(attempt*200)*time.Millisecond + time.Duration(rand.Intn(200))*time.Millisecond)
 	}
 	if lastErr != nil {
-		return "", lastErr
+		return res, lastErr
+	}
+	return res, nil
+}
+
+// FetchTranslationFromGenBank fetches the GenBank record (XML) for the given
+// nucleotide accession and extracts the first CDS translation found. Returns
+// empty string if not found.
+// FetchTranslationFromGenBank fetches a single accession translation using FetchTranslations under the hood.
+func FetchTranslationFromGenBank(accession string) (string, error) {
+	if accession == "" {
+		return "", nil
+	}
+	// check cache first
+	if v, ok := getCached(accession); ok {
+		return v, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	m, err := FetchTranslations(ctx, []string{accession})
+	if err != nil {
+		return "", err
+	}
+	if t, ok := m[accession]; ok {
+		return t, nil
 	}
 	return "", nil
 }

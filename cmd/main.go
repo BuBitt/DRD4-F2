@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -50,6 +51,19 @@ func (t *timestampWriter) Write(p []byte) (int, error) {
 	return total, nil
 }
 
+// terminalWriter wraps an io.Writer and exposes an Fd() method so
+// libraries that check for a terminal via the Fd method (like charm.log)
+// can detect a TTY even when we pass a wrapper writer.
+type terminalWriter struct {
+	w  io.Writer
+	fd uintptr
+}
+
+func (tw *terminalWriter) Write(p []byte) (int, error) { return tw.w.Write(p) }
+
+// Fd exposes the underlying file descriptor (e.g., os.Stderr.Fd()).
+func (tw *terminalWriter) Fd() uintptr { return tw.fd }
+
 func main() {
 	filename := "drd4-tdah.fasta"
 	data, err := os.ReadFile(filename)
@@ -73,10 +87,16 @@ func main() {
 			defer func() { _ = logFileHandle.Close() }()
 		}
 	}
-	logger := log.New(loggerOut)
-
-	// replace logger's writer with timestamping writer (defined at package level)
-	logger = log.New(&timestampWriter{w: loggerOut})
+	// If stderr is a terminal-like device, force colors for libraries that honor FORCE_COLOR.
+	if fi, err := os.Stderr.Stat(); err == nil {
+		if fi.Mode()&os.ModeCharDevice != 0 {
+			_ = os.Setenv("FORCE_COLOR", "1")
+		}
+	}
+	// create logger backed by the timestamping writer and expose Fd so charm.log can detect TTY
+	tw := &timestampWriter{w: loggerOut}
+	termW := &terminalWriter{w: tw, fd: os.Stderr.Fd()}
+	logger := log.New(termW)
 
 	// apply log level from config (default: info)
 	switch strings.ToLower(cfg.LogLevel) {
@@ -243,34 +263,103 @@ func main() {
 				acc = fields[0]
 			}
 
-			translation := ""
-			// Prefer translation from GenBank (NCBI) using the accession (first token of header)
-			if acc != "" {
-				logger.Debug("looking up translation in NCBI", "acc", acc)
-				if gb, err := ncbi.FetchTranslationFromGenBank(acc); err != nil {
-					logger.Warn("ncbi fetch error", "acc", acc, "err", err)
-				} else if gb != "" {
-					translation = gb
-					logger.Debug("ncbi translation found", "acc", acc)
-				} else {
-					logger.Debug("ncbi translation not found", "acc", acc)
-				}
-			}
-			// Fallback: use translation from external translator if GenBank not available
-			if translation == "" {
-				if t, ok := protMap[record.Header]; ok {
-					logger.Debug("using external translation", "header", record.Header)
-					translation = t
-				}
-			}
-
+			// don't fetch here; collect and resolve in batches later
 			variants = append(variants, Variant{
 				Name:             record.Header,
 				VariantCode:      acc,
 				Nucleotides:      record.Sequence,
-				Translated:       translation,
+				Translated:       "",
 				NucleotidesAlign: alignSeq,
 			})
+		}
+
+		// build list of accessions for NCBI lookup
+		accessions := []string{}
+		for _, v := range variants {
+			if v.VariantCode != "" {
+				accessions = append(accessions, v.VariantCode)
+			}
+		}
+
+		// prepare concurrency/qps/batch defaults
+		concurrency := cfg.NcbiConcurrency
+		if concurrency <= 0 {
+			concurrency = 8
+		}
+		qps := cfg.NcbiQPS
+		if qps <= 0 {
+			qps = 3
+		}
+		batchSize := cfg.NcbiBatchSize
+		if batchSize <= 0 {
+			batchSize = 10
+		}
+
+		logger.Info("starting ncbi batch lookup", "accessions", len(accessions), "concurrency", concurrency, "qps", qps, "batch_size", batchSize)
+
+		// simple rate limiter: tick channel at qps
+		tick := time.Tick(time.Second / time.Duration(qps))
+
+		// worker pool over batches
+		tasks := make(chan []string)
+		results := make(chan map[string]string)
+
+		var wg sync.WaitGroup
+		for i := 0; i < concurrency; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for batch := range tasks {
+					<-tick // rate limit per batch
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					m, err := ncbi.FetchTranslations(ctx, batch)
+					cancel()
+					if err != nil {
+						logger.Warn("ncbi batch fetch error", "err", err)
+					}
+					results <- m
+				}
+			}()
+		}
+
+		// dispatch batches
+		go func() {
+			for i := 0; i < len(accessions); i += batchSize {
+				end := i + batchSize
+				if end > len(accessions) {
+					end = len(accessions)
+				}
+				tasks <- accessions[i:end]
+			}
+			close(tasks)
+		}()
+
+		// collect results and fill variants map
+		received := 0
+		expected := (len(accessions) + batchSize - 1) / batchSize
+		merged := map[string]string{}
+		for received < expected {
+			m := <-results
+			for k, v := range m {
+				merged[k] = v
+			}
+			received++
+		}
+		close(results)
+		wg.Wait()
+
+		// fill translations into variants, fallback to protMap if needed
+		for i := range variants {
+			acc := variants[i].VariantCode
+			if acc != "" {
+				if t, ok := merged[acc]; ok && t != "" {
+					variants[i].Translated = t
+					continue
+				}
+			}
+			if t, ok := protMap[variants[i].Name]; ok {
+				variants[i].Translated = t
+			}
 		}
 		jsonData, err := json.MarshalIndent(variants, "", "  ")
 		if err != nil {

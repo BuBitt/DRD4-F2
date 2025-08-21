@@ -13,6 +13,9 @@ type Config struct {
 	NcbiCachePath         string `json:"ncbi_cache_path"`
 	NcbiApiKey            string `json:"ncbi_api_key"`
 	NcbiCacheTTLSecs      int64  `json:"ncbi_cache_ttl_seconds"`
+	NcbiConcurrency       int    `json:"ncbi_concurrency"`
+	NcbiQPS               int    `json:"ncbi_qps"`
+	NcbiBatchSize         int    `json:"ncbi_batch_size"`
 	UseExternalTranslator bool   `json:"use_external_translator"`
 }
 
