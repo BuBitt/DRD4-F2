@@ -13,11 +13,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/log"
-
 	"drd4/internal/config"
 	"drd4/internal/fasta"
 	"drd4/internal/ncbi"
+
+	"github.com/charmbracelet/log"
 )
 
 // Define aqui o cabeçalho da sequência de referência que será usada para o merge.
@@ -132,8 +132,15 @@ func main() {
 
 	// apply ncbi config
 	if cfg.NcbiCachePath != "" {
-		ncbi.SetCacheFilePath(cfg.NcbiCachePath)
-		logger.Debug("ncbi cache path set", "path", cfg.NcbiCachePath)
+		absPath, aerr := filepath.Abs(cfg.NcbiCachePath)
+		if aerr == nil {
+			ncbi.SetCacheFilePath(absPath)
+			logger.Info("ncbi cache path set from config (absolute)", "path", absPath)
+		} else {
+			ncbi.SetCacheFilePath(cfg.NcbiCachePath)
+			logger.Info("ncbi cache path set from config", "path", cfg.NcbiCachePath)
+		}
+		defer ncbi.FlushCache()
 	}
 	if cfg.NcbiApiKey != "" {
 		// set the API key directly from config.json (config-only mode)
@@ -160,13 +167,16 @@ func main() {
 		if mpath, err := exec.LookPath("mafft"); err == nil {
 			logger.Debug("mafft path", "path", mpath)
 			logger.Info("mafft found, running alignment")
-			cmd := exec.Command(mpath, "--auto", filename)
-			logger.Debug("running command", "cmd", strings.Join(cmd.Args, " "))
-			out, err := cmd.Output()
+			// run mafft with a 10-minute timeout and capture combined output
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			start := time.Now()
+			out, err := exec.CommandContext(ctx, mpath, "--auto", filename).CombinedOutput()
+			dur := time.Since(start)
 			if err != nil {
-				logger.Error("mafft failed", "err", err)
+				logger.Error("mafft failed or timed out", "err", err, "duration_ms", dur.Milliseconds(), "out_size", len(out))
 			} else {
-				logger.Debug("mafft output size", "bytes", len(out))
+				logger.Debug("mafft finished", "duration_ms", dur.Milliseconds(), "out_size", len(out))
 				aligned := fasta.ParseFasta(strings.NewReader(string(out)))
 				for _, a := range aligned {
 					alignMap[a.Header] = a.Sequence
@@ -214,11 +224,14 @@ func main() {
 			if tpath, err := exec.LookPath("transeq"); err == nil {
 				logger.Info("using external translator", "tool", "transeq")
 				logger.Debug("transeq path", "path", tpath)
-				cmd := exec.Command(tpath, "-sequence", tmp.Name(), "-outseq", "-")
+				// run transeq with timeout and combined output
+				ctxT, cancelT := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancelT()
+				cmd := exec.CommandContext(ctxT, tpath, "-sequence", tmp.Name(), "-outseq", "-")
 				logger.Debug("running command", "cmd", strings.Join(cmd.Args, " "))
-				out, err := cmd.Output()
+				out, err := cmd.CombinedOutput()
 				if err != nil {
-					logger.Error("transeq failed", "err", err)
+					logger.Error("transeq failed", "err", err, "out_size", len(out))
 				} else {
 					logger.Debug("transeq output size", "bytes", len(out))
 					prots := fasta.ParseFasta(strings.NewReader(string(out)))
@@ -230,11 +243,14 @@ func main() {
 			} else if tpath, err := exec.LookPath("seqkit"); err == nil {
 				logger.Info("using external translator", "tool", "seqkit")
 				logger.Debug("seqkit path", "path", tpath)
-				cmd := exec.Command(tpath, "translate", "-w", "0", tmp.Name())
+				// run seqkit with timeout and combined output
+				ctxS, cancelS := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancelS()
+				cmd := exec.CommandContext(ctxS, tpath, "translate", "-w", "0", tmp.Name())
 				logger.Debug("running command", "cmd", strings.Join(cmd.Args, " "))
-				out, err := cmd.Output()
+				out, err := cmd.CombinedOutput()
 				if err != nil {
-					logger.Error("seqkit translate failed", "err", err)
+					logger.Error("seqkit translate failed", "err", err, "out_size", len(out))
 				} else {
 					logger.Debug("seqkit output size", "bytes", len(out))
 					prots := fasta.ParseFasta(strings.NewReader(string(out)))

@@ -119,6 +119,12 @@ func saveCache() {
 	_ = os.WriteFile(path, b, 0o644)
 }
 
+// FlushCache forces a synchronous write of the in-memory cache to disk.
+// Call this on program shutdown to avoid losing recent cache entries.
+func FlushCache() {
+	saveCache()
+}
+
 func getCached(acc string) (string, bool) {
 	loadCache()
 	cacheMu.RLock()

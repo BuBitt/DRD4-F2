@@ -1,0 +1,37 @@
+2025-08-21T00:17:54-03:00 INFO starting drd4 input_fasta=drd4-tdah.fasta output_json=database.json log_file=log_file.log ncbi_cache_path=./ncbi-cache.json ncbi_cache_ttl_secs=604800
+2025-08-21T00:17:54-03:00 INFO ncbi api key set from config.json (value not logged)
+2025-08-21T00:17:54-03:00 INFO parsed fasta path=drd4-tdah.fasta records=48
+2025-08-21T00:17:54-03:00 INFO mafft found, running alignment
+2025-08-21T00:18:01-03:00 INFO mafft finished aligned_records=48
+2025-08-21T00:18:01-03:00 INFO wrote aligned sequences to temp file path=/tmp/aligned-1312630475.fasta
+2025-08-21T00:18:01-03:00 INFO external translator disabled by config; skipping translation step
+2025-08-21T00:18:01-03:00 INFO starting ncbi batch lookup accessions=48 concurrency=8 qps=3 batch_size=10
+2025-08-21T00:18:03-03:00 INFO wrote output JSON path=database.json variants=48
+2025-08-21T00:19:32-03:00 INFO starting drd4 input_fasta=drd4-tdah.fasta output_json=database.json log_file=log_file.log ncbi_cache_path=./ncbi-cache.json ncbi_cache_ttl_secs=604800
+2025-08-21T00:19:32-03:00 INFO ncbi api key set from config.json (value not logged)
+2025-08-21T00:19:32-03:00 INFO parsed fasta path=drd4-tdah.fasta records=48
+2025-08-21T00:19:32-03:00 INFO mafft found, running alignment
+2025-08-21T00:19:45-03:00 INFO mafft finished aligned_records=48
+2025-08-21T00:19:45-03:00 INFO wrote aligned sequences to temp file path=/tmp/aligned-4015719729.fasta
+2025-08-21T00:19:45-03:00 INFO external translator disabled by config; skipping translation step
+2025-08-21T00:19:45-03:00 INFO starting ncbi batch lookup accessions=48 concurrency=8 qps=3 batch_size=10
+2025-08-21T00:19:47-03:00 INFO wrote output JSON path=database.json variants=48
+2025-08-21T00:20:57-03:00 INFO starting drd4 input_fasta=drd4-tdah.fasta output_json=database.json log_file=log_file.log ncbi_cache_path=./ncbi-cache.json ncbi_cache_ttl_secs=604800
+2025-08-21T00:20:57-03:00 INFO ncbi api key set from config.json (value not logged)
+2025-08-21T00:20:57-03:00 INFO parsed fasta path=drd4-tdah.fasta records=48
+2025-08-21T00:20:57-03:00 INFO mafft found, running alignment
+2025-08-21T00:21:04-03:00 INFO mafft finished aligned_records=48
+2025-08-21T00:21:04-03:00 INFO wrote aligned sequences to temp file path=/tmp/aligned-3827155073.fasta
+2025-08-21T00:21:04-03:00 INFO external translator disabled by config; skipping translation step
+2025-08-21T00:21:04-03:00 INFO starting ncbi batch lookup accessions=48 concurrency=8 qps=3 batch_size=10
+2025-08-21T00:21:06-03:00 INFO wrote output JSON path=database.json variants=48
+2025-08-21T00:21:47-03:00 INFO starting drd4 input_fasta=drd4-tdah.fasta output_json=database.json log_file=log_file.log ncbi_cache_path=./ncbi-cache.json ncbi_cache_ttl_secs=604800
+2025-08-21T00:21:47-03:00 INFO ncbi cache path set from config (absolute) path=/home/study/Projects/Go/drd4/ncbi-cache.json
+2025-08-21T00:21:47-03:00 INFO ncbi api key set from config.json (value not logged)
+2025-08-21T00:21:47-03:00 INFO parsed fasta path=drd4-tdah.fasta records=48
+2025-08-21T00:21:47-03:00 INFO mafft found, running alignment
+2025-08-21T00:21:54-03:00 INFO mafft finished aligned_records=48
+2025-08-21T00:21:54-03:00 INFO wrote aligned sequences to temp file path=/tmp/aligned-619499150.fasta
+2025-08-21T00:21:54-03:00 INFO external translator disabled by config; skipping translation step
+2025-08-21T00:21:54-03:00 INFO starting ncbi batch lookup accessions=48 concurrency=8 qps=3 batch_size=10
+2025-08-21T00:21:55-03:00 INFO wrote output JSON path=database.json variants=48
