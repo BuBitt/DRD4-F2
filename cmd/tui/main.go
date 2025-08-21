@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 
@@ -134,15 +133,10 @@ type model struct {
 }
 
 func initialModel() model {
-	// Load data
-	data, err := os.ReadFile("database.json")
-	if err != nil {
-		log.Fatal(err)
-	}
-
+	// Load data; if missing, return an empty model instead of exiting.
 	var records []DRD4Record
-	if err := json.Unmarshal(data, &records); err != nil {
-		log.Fatal(err)
+	if data, err := os.ReadFile("database.json"); err == nil {
+		_ = json.Unmarshal(data, &records)
 	}
 
 	// Create list items
@@ -168,6 +162,19 @@ func initialModel() model {
 
 func (m model) Init() tea.Cmd {
 	return nil
+}
+
+// cycleMode advances the current view mode in the sequence Nucleotides->Translated->Alignment->Nucleotides.
+func (m model) cycleMode() model {
+	switch m.currentMode {
+	case modeNucleotides:
+		m.currentMode = modeTranslated
+	case modeTranslated:
+		m.currentMode = modeAlignment
+	default:
+		m.currentMode = modeNucleotides
+	}
+	return m
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -271,6 +278,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showHelp = !m.showHelp
 			return m, nil
 
+		case "tab":
+			m.rightFocused = !m.rightFocused
+			return m, nil
+
 		case "1":
 			m.currentMode = modeNucleotides
 			return m, nil
@@ -284,9 +295,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "right":
-			// focus right panel and reset scroll
-			m.rightFocused = true
-			m.rightScroll = 0
+			// cycle view modes (like pressing 1,2,3)
+			m = m.cycleMode()
 			return m, nil
 		}
 	}

@@ -237,14 +237,16 @@ func main() {
 		}
 
 		type Variant struct {
-			Name              string `json:"name"`
-			VariantCode       string `json:"variant_code"`
-			Nucleotides       string `json:"nucleotides"`
-			Translated        string `json:"translated,omitempty"`
-			PBCount           int    `json:"pb_count,omitempty"`
-			AACount           int    `json:"aa_count,omitempty"`
-			TranslationSource string `json:"translation_source,omitempty"`
-			NucleotidesAlign  string `json:"nucleotides_align"`
+			Name               string `json:"name"`
+			VariantCode        string `json:"variant_code"`
+			PBCount            int    `json:"pb_count,omitempty"`
+			AACount            int    `json:"aa_count,omitempty"`
+			TranslationSource  string `json:"translation_source,omitempty"`
+			Nucleotides        string `json:"nucleotides"`
+			Translated         string `json:"translated,omitempty"`
+			NucleotidesAlign   string `json:"nucleotides_align"`
+			TranslateAlign     string `json:"translate_align,omitempty"`
+			TranslateMergedRef string `json:"translate_merged_ref,omitempty"`
 		}
 		var variants []Variant
 
@@ -442,6 +444,96 @@ func main() {
 
 		// Log counts of translation sources and aggregated PB/AA from NCBI and seqkit
 		logger.Info("translation sources summary", "ncbi_translations", ncbiCount, "seqkit_translations", seqkitCount, "ncbi_total_pb", ncbiTotalPB, "ncbi_total_aa", ncbiTotalAA, "seqkit_total_pb", seqkitTotalPB, "seqkit_total_aa", seqkitTotalAA)
+
+		// Build protein FASTA from existing translations for alignment
+		protTmp, perr := os.CreateTemp("", "prot-*.fasta")
+		if perr != nil {
+			logger.Error("failed to create temp file for protein alignment", "err", perr)
+		} else {
+			// write translated sequences; if a variant lacks translation, write empty placeholder
+			for i, v := range variants {
+				seq := v.Translated
+				if seq == "" {
+					seq = strings.Repeat("-", 1) // placeholder single gap
+				}
+				fmt.Fprintf(protTmp, ">%d|%s\n%s\n", i, v.VariantCode, seq)
+			}
+			protTmp.Close()
+
+			// Run MAFFT on protein FASTA (required by request)
+			mpath, merr := exec.LookPath("mafft")
+			if merr != nil {
+				logger.Fatal("mafft not found in PATH; protein alignment required")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			args := append(strings.Fields(*mafftArgs), protTmp.Name())
+			out, err := exec.CommandContext(ctx, mpath, args...).CombinedOutput()
+			if err != nil {
+				logger.Fatal("mafft protein alignment failed", "err", err, "output", string(out))
+			}
+			alignedProt := fasta.ParseFasta(strings.NewReader(string(out)))
+
+			// map aligned proteins back to variants
+			for _, ap := range alignedProt {
+				// header format: index|variant
+				parts := strings.SplitN(ap.Header, "|", 2)
+				if len(parts) < 1 {
+					continue
+				}
+				idx := 0
+				fmt.Sscanf(parts[0], "%d", &idx)
+				if idx >= 0 && idx < len(variants) {
+					variants[idx].TranslateAlign = ap.Sequence
+				}
+			}
+
+			_ = os.Remove(protTmp.Name())
+		}
+
+		// Identify reference aligned translation (use first variant matching ReferenceHeader or 0)
+		refIdx := 0
+		for i, v := range variants {
+			if strings.Contains(v.Name, ReferenceHeader) {
+				refIdx = i
+				break
+			}
+		}
+		refAlign := variants[refIdx].TranslateAlign
+
+		// Merge: for each variant, replace '-' in TranslateAlign with corresponding AA from refAlign
+		for i := range variants {
+			va := variants[i].TranslateAlign
+			if va == "" {
+				variants[i].TranslateMergedRef = ""
+				continue
+			}
+			merged := []rune{}
+			max := len(refAlign)
+			if len(va) > max {
+				max = len(va)
+			}
+			for j := 0; j < max; j++ {
+				var c rune = '-'
+				if j < len(va) {
+					c = rune(va[j])
+				}
+				if c == '-' {
+					if j < len(refAlign) {
+						r := rune(refAlign[j])
+						if r != '-' {
+							merged = append(merged, r)
+							continue
+						}
+					}
+					merged = append(merged, '-')
+					continue
+				}
+				merged = append(merged, c)
+			}
+			variants[i].TranslateMergedRef = string(merged)
+		}
+
 		jsonData, err := json.MarshalIndent(variants, "", "  ")
 		if err != nil {
 			logger.Fatal("json marshal failed", "err", err)
