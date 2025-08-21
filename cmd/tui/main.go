@@ -295,18 +295,24 @@ func (m model) renderRightPanel() string {
 	if src == "" {
 		src = "unknown"
 	}
-	// colorize the source token in the meta line
-	var srcColored string
+	// colorize the source token and make PB/AA use the same color/style
+	var srcStyle lipgloss.Style
 	switch record.TranslationSource {
 	case "ncbi":
-		srcColored = sourceNCBIStyle.Render("ncbi")
+		srcStyle = sourceNCBIStyle
 	case "seqkit":
-		srcColored = sourceSeqkitStyle.Render("seqkit")
+		srcStyle = sourceSeqkitStyle
 	default:
-		srcColored = sourceUnknownStyle.Render("unknown")
+		srcStyle = sourceUnknownStyle
 	}
-	meta := fmt.Sprintf("Source: %s    PB: %d    AA: %d", srcColored, record.PBCount, record.AACount)
-	metaStr := lipgloss.NewStyle().Foreground(mutedColor).Render(meta)
+
+	// Build meta parts: label (muted) and colored tokens for source/PB/AA
+	label := lipgloss.NewStyle().Foreground(mutedColor)
+	srcColored := srcStyle.Render(record.TranslationSource)
+	pbColored := srcStyle.Render(fmt.Sprintf("PB: %d", record.PBCount))
+	aaColored := srcStyle.Render(fmt.Sprintf("AA: %d", record.AACount))
+
+	metaStr := label.Render("Source: ") + srcColored + label.Render("    ") + pbColored + label.Render("    ") + aaColored
 
 	// Content based on current mode
 	var content string
