@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"strings"
@@ -36,18 +35,10 @@ var (
 			Bold(true).
 			Align(lipgloss.Center)
 
-	selectedStyle = lipgloss.NewStyle().
-			Foreground(primaryColor).
-			Bold(true)
-
 	statusBarStyle = lipgloss.NewStyle().
 			Foreground(textColor).
 			Background(surfaceColor).
 			Padding(0, 1)
-
-	helpStyle = lipgloss.NewStyle().
-			Foreground(mutedColor).
-			Italic(true)
 
 	sequenceStyle = lipgloss.NewStyle().
 			Foreground(textColor).
@@ -144,7 +135,7 @@ type model struct {
 
 func initialModel() model {
 	// Load data
-	data, err := ioutil.ReadFile("database.json")
+	data, err := os.ReadFile("database.json")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -232,7 +223,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					rec := sel.(listItem).record
 					lines := m.buildRightLines(rec)
 					if len(lines) > 0 {
-						max = len(lines) - (m.height - 6)
+						// header+mode+meta+blank take 4 lines in the focused panel
+						headerLines := 4
+						visibleSeqRows := (m.height - 6) - headerLines
+						if visibleSeqRows < 1 {
+							visibleSeqRows = 1
+						}
+						max = len(lines) - visibleSeqRows
 						if max < 0 {
 							max = 0
 						}
@@ -241,6 +238,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.rightScroll < max {
 					m.rightScroll++
 				}
+				return m, nil
+			case "pgup":
+				// page up
+				page := m.height - 6
+				if page <= 0 {
+					page = 10
+				}
+				m.rightScroll -= page
+				if m.rightScroll < 0 {
+					m.rightScroll = 0
+				}
+				return m, nil
+			case "pgdown":
+				page := m.height - 6
+				if page <= 0 {
+					page = 10
+				}
+				m.rightScroll += page
 				return m, nil
 			case "left":
 				m.rightFocused = false
@@ -321,20 +336,6 @@ func (m model) buildRightLines(rec DRD4Record) []string {
 	if wrapWidth < 20 {
 		wrapWidth = 20
 	}
-
-	lines := []string{}
-	// header (single line)
-	lines = append(lines, fmt.Sprintf("%s - %s", rec.VariantCode, rec.Name))
-	// mode/title
-	lines = append(lines, fmt.Sprintf("Mode: %s", m.currentMode.String()))
-	// source and counts
-	src := rec.TranslationSource
-	if src == "" {
-		src = "unknown"
-	}
-	lines = append(lines, fmt.Sprintf("Source: %s    PB: %d    AA: %d", src, rec.PBCount, rec.AACount))
-	lines = append(lines, "")
-
 	// sequence content depending on mode
 	var seqText string
 	switch m.currentMode {
@@ -345,9 +346,9 @@ func (m model) buildRightLines(rec DRD4Record) []string {
 	case modeAlignment:
 		seqText = rec.NucleotidesAlign
 	}
-
-	// Normalize and split into wrapped lines
+	// Normalize and split into wrapped lines — return only sequence lines (no header/meta)
 	seqText = strings.ReplaceAll(seqText, "\r", "")
+	lines := []string{}
 	for _, ln := range strings.Split(seqText, "\n") {
 		if ln == "" {
 			lines = append(lines, "")
@@ -434,11 +435,15 @@ func (m model) renderRightPanel() string {
 		// build lines dynamically from selected record
 		lines := m.buildRightLines(record)
 		if len(lines) > 0 {
-			// Determine visible rows for the right panel. Keep parity with Update()
-			// which used (m.height - 6) as the visible area when computing max scroll.
-			visible := m.height - 6
-			if visible < 3 {
-				visible = 3
+			// Determine visible sequence rows for the right panel. Header/meta occupy fixed lines.
+			totalVisible := m.height - 6
+			if totalVisible < 5 {
+				totalVisible = 5
+			}
+			headerLines := 4
+			visible := totalVisible - headerLines
+			if visible < 1 {
+				visible = 1
 			}
 
 			// Clamp scroll
@@ -471,14 +476,19 @@ func (m model) renderRightPanel() string {
 				Width(rightWidth - 6).
 				Render(visibleSlice)
 
-			// Compose header, meta and sequence into the content
-			content = lipgloss.JoinVertical(
+			// Compose header, meta and sequence into the focused panel and return
+			panelContentFocused := lipgloss.JoinVertical(
 				lipgloss.Left,
 				headerRendered,
 				metaStr,
 				"",
 				seqRendered,
 			)
+
+			return containerStyle.
+				Width(rightWidth - 2).
+				Height(m.height - 4).
+				Render(panelContentFocused)
 		}
 	} else {
 		switch m.currentMode {
