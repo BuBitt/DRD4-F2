@@ -20,8 +20,8 @@ import (
 	"github.com/charmbracelet/log"
 )
 
-// Define aqui o cabeçalho da sequência de referência que será usada para o merge.
-// Ajuste este valor para corresponder ao cabeçalho exato presente no seu FASTA.
+// ReferenceHeader is the FASTA header used as the canonical reference during merges.
+// Adjust this value to match the header present in your input FASTA when merging.
 const ReferenceHeader = "NM_000797.4 Homo sapiens dopamine receptor D4 (DRD4), mRNA"
 
 // timestampWriter prefixes each flushed line with an RFC3339 timestamp.
@@ -31,8 +31,8 @@ type timestampWriter struct {
 	mu  sync.Mutex
 }
 
-// Write buffers bytes until a newline is found; for each full line, write a timestamped line
-// to the underlying writer. Partial lines are kept in the buffer.
+// Write buffers bytes until a newline is found; for each full line, write a timestamped
+// line to the underlying writer. Partial lines are kept in the buffer.
 func (t *timestampWriter) Write(p []byte) (int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -51,9 +51,8 @@ func (t *timestampWriter) Write(p []byte) (int, error) {
 	return total, nil
 }
 
-// terminalWriter wraps an io.Writer and exposes an Fd() method so
-// libraries that check for a terminal via the Fd method (like charm.log)
-// can detect a TTY even when we pass a wrapper writer.
+// terminalWriter wraps an io.Writer and exposes an Fd method so libraries that
+// inspect the file descriptor (for TTY detection) can work with wrapped writers.
 type terminalWriter struct {
 	w  io.Writer
 	fd uintptr
