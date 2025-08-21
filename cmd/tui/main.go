@@ -138,9 +138,8 @@ type model struct {
 	totalRecords  int
 	selectedIndex int
 	// right panel focus/scroll state
-	rightFocused      bool
-	rightScroll       int
-	rightContentLines []string
+	rightFocused bool
+	rightScroll  int
 }
 
 func initialModel() model {
@@ -195,6 +194,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 
+	case tea.MouseMsg:
+		// Basic mouse support: left click on right panel focuses it. Use newer MouseAction/MouseButton API.
+		x := msg.X
+		listWidth := m.width / 3
+		if x >= listWidth {
+			text := msg.String()
+			// crude detection for left click release in different bubbletea versions
+			if strings.Contains(strings.ToLower(text), "left") || strings.Contains(strings.ToLower(text), "mouseleft") {
+				m.rightFocused = true
+				// approximate scroll based on click Y so user lands near clicked position
+				headerHeight := 4
+				newScroll := msg.Y - headerHeight - 2
+				if newScroll < 0 {
+					newScroll = 0
+				}
+				m.rightScroll = newScroll
+			}
+			return m, nil
+		}
+
 	case tea.KeyMsg:
 		k := msg.String()
 		// When right panel is focused, intercept up/down/left/right for scrolling
@@ -206,12 +225,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "down", "j":
-				// compute max scroll
+				// compute max scroll using dynamically built lines from selected record
+				sel := m.list.SelectedItem()
 				max := 0
-				if len(m.rightContentLines) > 0 {
-					max = len(m.rightContentLines) - (m.height - 6)
-					if max < 0 {
-						max = 0
+				if sel != nil {
+					rec := sel.(listItem).record
+					lines := m.buildRightLines(rec)
+					if len(lines) > 0 {
+						max = len(lines) - (m.height - 6)
+						if max < 0 {
+							max = 0
+						}
 					}
 				}
 				if m.rightScroll < max {
@@ -245,45 +269,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "right":
-			// focus right panel
+			// focus right panel and reset scroll
 			m.rightFocused = true
 			m.rightScroll = 0
-			// prepare content lines for scrolling
-			sel := m.list.SelectedItem()
-			if sel != nil {
-				rec := sel.(listItem).record
-				// build lines from header, meta and content
-				lines := []string{}
-				lines = append(lines, fmt.Sprintf("%s - %s", rec.VariantCode, rec.Name))
-				src := rec.TranslationSource
-				if src == "" {
-					src = "unknown"
-				}
-				lines = append(lines, fmt.Sprintf("Source: %s    PB: %d    AA: %d", src, rec.PBCount, rec.AACount))
-				// add sequence content depending on mode
-				var seqText string
-				switch m.currentMode {
-				case modeNucleotides:
-					seqText = rec.Nucleotides
-				case modeTranslated:
-					seqText = rec.Translated
-				case modeAlignment:
-					seqText = rec.NucleotidesAlign
-				}
-				// split into wrapped lines by width
-				wrapWidth := (m.width*2)/3 - 8
-				if wrapWidth < 20 {
-					wrapWidth = 20
-				}
-				for _, ln := range strings.Split(seqText, "\n") {
-					for len(ln) > wrapWidth {
-						lines = append(lines, ln[:wrapWidth])
-						ln = ln[wrapWidth:]
-					}
-					lines = append(lines, ln)
-				}
-				m.rightContentLines = lines
-			}
 			return m, nil
 		}
 	}
@@ -322,6 +310,57 @@ func (m model) View() string {
 		main,
 		statusBar,
 	)
+}
+
+// buildRightLines constructs the lines that will be shown in the right panel
+// for a given record, wrapped to the appropriate width according to current
+// model dimensions and currentMode.
+func (m model) buildRightLines(rec DRD4Record) []string {
+	rightWidth := (m.width * 2) / 3
+	wrapWidth := rightWidth - 12 // account for padding and borders
+	if wrapWidth < 20 {
+		wrapWidth = 20
+	}
+
+	lines := []string{}
+	// header (single line)
+	lines = append(lines, fmt.Sprintf("%s - %s", rec.VariantCode, rec.Name))
+	// mode/title
+	lines = append(lines, fmt.Sprintf("Mode: %s", m.currentMode.String()))
+	// source and counts
+	src := rec.TranslationSource
+	if src == "" {
+		src = "unknown"
+	}
+	lines = append(lines, fmt.Sprintf("Source: %s    PB: %d    AA: %d", src, rec.PBCount, rec.AACount))
+	lines = append(lines, "")
+
+	// sequence content depending on mode
+	var seqText string
+	switch m.currentMode {
+	case modeNucleotides:
+		seqText = rec.Nucleotides
+	case modeTranslated:
+		seqText = rec.Translated
+	case modeAlignment:
+		seqText = rec.NucleotidesAlign
+	}
+
+	// Normalize and split into wrapped lines
+	seqText = strings.ReplaceAll(seqText, "\r", "")
+	for _, ln := range strings.Split(seqText, "\n") {
+		if ln == "" {
+			lines = append(lines, "")
+			continue
+		}
+		for len(ln) > wrapWidth {
+			lines = append(lines, ln[:wrapWidth])
+			ln = ln[wrapWidth:]
+		}
+		lines = append(lines, ln)
+	}
+
+	return lines
 }
 
 func (m model) renderLeftPanel() string {
@@ -391,35 +430,56 @@ func (m model) renderRightPanel() string {
 	// Content based on current mode. If right panel is focused we render
 	// the prepared rightContentLines and honor rightScroll (visible window).
 	var content string
-	if m.rightFocused && len(m.rightContentLines) > 0 {
-		// Determine visible rows for the right panel. Keep parity with Update()
-		// which used (m.height - 6) as the visible area when computing max scroll.
-		visible := m.height - 6
-		if visible < 3 {
-			visible = 3
-		}
+	if m.rightFocused {
+		// build lines dynamically from selected record
+		lines := m.buildRightLines(record)
+		if len(lines) > 0 {
+			// Determine visible rows for the right panel. Keep parity with Update()
+			// which used (m.height - 6) as the visible area when computing max scroll.
+			visible := m.height - 6
+			if visible < 3 {
+				visible = 3
+			}
 
-		// Clamp scroll
-		if m.rightScroll < 0 {
-			m.rightScroll = 0
-		}
+			// Clamp scroll
+			if m.rightScroll < 0 {
+				m.rightScroll = 0
+			}
 
-		start := m.rightScroll
-		end := start + visible
-		if start > len(m.rightContentLines) {
-			start = len(m.rightContentLines)
-		}
-		if end > len(m.rightContentLines) {
-			end = len(m.rightContentLines)
-		}
+			start := m.rightScroll
+			end := start + visible
+			if start > len(lines) {
+				start = len(lines)
+			}
+			if end > len(lines) {
+				end = len(lines)
+			}
 
-		visibleSlice := strings.Join(m.rightContentLines[start:end], "\n")
+			visibleSlice := strings.Join(lines[start:end], "\n")
 
-		// Render visible slice inside the same sequenceStyle used elsewhere,
-		// constraining the width to the right panel width minus padding.
-		content = sequenceStyle.
-			Width(rightWidth - 6).
-			Render(visibleSlice)
+			// Build header with focus indicator and mode title so the title never disappears
+			focusIndicator := ""
+			if m.rightFocused {
+				focusIndicator = lipgloss.NewStyle().Foreground(accentColor).Bold(true).Render(" [RIGHT]")
+			}
+
+			headerLine := fmt.Sprintf("%s - %s (%s)%s", record.VariantCode, record.Name, m.currentMode.String(), focusIndicator)
+			headerRendered := titleStyle.Render(headerLine)
+
+			// Render the visible sequence slice
+			seqRendered := sequenceStyle.
+				Width(rightWidth - 6).
+				Render(visibleSlice)
+
+			// Compose header, meta and sequence into the content
+			content = lipgloss.JoinVertical(
+				lipgloss.Left,
+				headerRendered,
+				metaStr,
+				"",
+				seqRendered,
+			)
+		}
 	} else {
 		switch m.currentMode {
 		case modeNucleotides:
