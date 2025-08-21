@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +42,8 @@ func init() {
 type cachedEntry struct {
 	Translation string `json:"translation"`
 	RetrievedAt int64  `json:"retrieved_at"`
+	PBCount     int    `json:"pb_count,omitempty"`
+	AACount     int    `json:"aa_count,omitempty"`
 }
 
 var (
@@ -140,13 +143,13 @@ func getCached(acc string) (string, bool) {
 	return e.Translation, true
 }
 
-func setCached(acc, tr string) {
+func setCached(acc, tr string, pbCount, aaCount int) {
 	if acc == "" || tr == "" {
 		return
 	}
 	loadCache()
 	cacheMu.Lock()
-	cache[acc] = cachedEntry{Translation: tr, RetrievedAt: time.Now().Unix()}
+	cache[acc] = cachedEntry{Translation: tr, RetrievedAt: time.Now().Unix(), PBCount: pbCount, AACount: aaCount}
 	cacheMu.Unlock()
 	// do not block; background goroutine flushes periodically
 }
@@ -200,6 +203,7 @@ func FetchTranslations(ctx context.Context, accessions []string) (map[string]str
 				var currentAcc string
 				var lastQualifierName string
 				var collected []string
+				var currentPBLen int
 				for {
 					tk, err := dec.Token()
 					if err != nil {
@@ -228,10 +232,20 @@ func FetchTranslations(ctx context.Context, accessions []string) (map[string]str
 								tr = strings.ReplaceAll(tr, " ", "")
 								if currentAcc != "" {
 									res[currentAcc] = tr
-									setCached(currentAcc, tr)
+									setCached(currentAcc, tr, currentPBLen, len(tr))
 								} else {
 									// no accession element found for this translation; collect it
 									collected = append(collected, tr)
+								}
+							}
+						} else if el.Name.Local == "GBSeq_length" {
+							// nucleotide length
+							var lstr string
+							_ = dec.DecodeElement(&lstr, &el)
+							// parse int; ignore errors
+							if lstr != "" {
+								if v, err := strconv.Atoi(strings.TrimSpace(lstr)); err == nil {
+									currentPBLen = v
 								}
 							}
 						}
@@ -241,7 +255,8 @@ func FetchTranslations(ctx context.Context, accessions []string) (map[string]str
 				// and the request was for a single accession, assign the first collected translation
 				if len(res) == 0 && len(collected) > 0 && len(missing) == 1 {
 					res[missing[0]] = collected[0]
-					setCached(missing[0], collected[0])
+					// no pb info available here
+					setCached(missing[0], collected[0], 0, len(collected[0]))
 				}
 				return res, nil
 			}
