@@ -463,10 +463,8 @@ func (m model) renderRightPanel() string {
 			visibleSlice := strings.Join(lines[start:end], "\n")
 
 			// Build header with focus indicator and mode title so the title never disappears
+			// no focus indicator text (we keep UI minimal)
 			focusIndicator := ""
-			if m.rightFocused {
-				focusIndicator = lipgloss.NewStyle().Foreground(accentColor).Bold(true).Render(" [RIGHT]")
-			}
 
 			headerLine := fmt.Sprintf("%s - %s (%s)%s", record.VariantCode, record.Name, m.currentMode.String(), focusIndicator)
 			headerRendered := titleStyle.Render(headerLine)
