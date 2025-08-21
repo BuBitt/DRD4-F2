@@ -308,3 +308,18 @@ func FetchTranslationFromGenBank(accession string) (string, error) {
 	}
 	return "", nil
 }
+
+// GetCachedMetadata returns translation, pbCount, aaCount and found flag for an accession from the cache.
+// It does not attempt network fetch; it only reads the in-memory/disk cache.
+func GetCachedMetadata(acc string) (string, int, int, bool) {
+	if acc == "" {
+		return "", 0, 0, false
+	}
+	loadCache()
+	cacheMu.RLock()
+	defer cacheMu.RUnlock()
+	if e, ok := cache[acc]; ok {
+		return e.Translation, e.PBCount, e.AACount, true
+	}
+	return "", 0, 0, false
+}

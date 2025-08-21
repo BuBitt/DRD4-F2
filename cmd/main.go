@@ -241,6 +241,8 @@ func main() {
 			VariantCode      string `json:"variant_code"`
 			Nucleotides      string `json:"nucleotides"`
 			Translated       string `json:"translated,omitempty"`
+			PBCount          int    `json:"pb_count,omitempty"`
+			AACount          int    `json:"aa_count,omitempty"`
 			NucleotidesAlign string `json:"nucleotides_align"`
 		}
 		var variants []Variant
@@ -390,6 +392,8 @@ func main() {
 
 		ncbiCount := 0
 		seqkitCount := 0
+		ncbiTotalPB := 0
+		ncbiTotalAA := 0
 		// First assign NCBI translations and collect records that need seqkit
 		missingForSeqkit := []translator.TranslatorRecord{}
 		for i := range variants {
@@ -397,6 +401,13 @@ func main() {
 			if acc != "" {
 				if t, ok := merged[acc]; ok && t != "" {
 					variants[i].Translated = t
+					// try to read cached metadata (pb/aa)
+					if _, pb, aa, ok2 := ncbi.GetCachedMetadata(acc); ok2 {
+						variants[i].PBCount = pb
+						variants[i].AACount = aa
+						ncbiTotalPB += pb
+						ncbiTotalAA += aa
+					}
 					ncbiCount++
 					continue
 				}
@@ -406,16 +417,22 @@ func main() {
 			}
 		}
 
+		seqkitTotalPB := 0
+		seqkitTotalAA := 0
 		if len(missingForSeqkit) > 0 && seqkitPath != "" {
 			translatedMap, _ := translator.TranslateMissing(missingForSeqkit, seqkitPath, 15*time.Second)
 			for idx, seq := range translatedMap {
 				variants[idx].Translated = seq
+				// seqkit produced protein sequence; record AA count and 0 for PB
+				variants[idx].AACount = len(seq)
+				variants[idx].PBCount = 0
 				seqkitCount++
+				seqkitTotalAA += len(seq)
 			}
 		}
 
-		// Log counts of translation sources
-		logger.Info("translation sources summary", "ncbi_translations", ncbiCount, "seqkit_translations", seqkitCount)
+		// Log counts of translation sources and aggregated PB/AA from NCBI and seqkit
+		logger.Info("translation sources summary", "ncbi_translations", ncbiCount, "seqkit_translations", seqkitCount, "ncbi_total_pb", ncbiTotalPB, "ncbi_total_aa", ncbiTotalAA, "seqkit_total_pb", seqkitTotalPB, "seqkit_total_aa", seqkitTotalAA)
 		jsonData, err := json.MarshalIndent(variants, "", "  ")
 		if err != nil {
 			logger.Fatal("json marshal failed", "err", err)
