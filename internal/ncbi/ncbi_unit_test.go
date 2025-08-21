@@ -71,7 +71,6 @@ func TestFetchTranslationFromGenBank_XML(t *testing.T) {
 	}
 }
 
-// Test fetch translations for multiple accessions returned in a single XML payload.
 func TestFetchTranslations_BatchMapping(t *testing.T) {
 	xml := `<?xml version="1.0"?>
 <GBSet>
@@ -128,7 +127,6 @@ func TestFetchTranslations_BatchMapping(t *testing.T) {
 	}
 }
 
-// Test that FetchTranslations retries on 429 and honors Retry-After header.
 func TestFetchTranslations_RetryAndRetryAfter(t *testing.T) {
 	calls := 0
 	xml := `<?xml version="1.0"?>
@@ -151,7 +149,6 @@ func TestFetchTranslations_RetryAndRetryAfter(t *testing.T) {
 	httpClient = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 		calls++
 		if calls == 1 {
-			// first call: 429 with Retry-After: 1
 			h := make(http.Header)
 			h.Set("Retry-After", "1")
 			return &http.Response{StatusCode: 429, Body: ioutil.NopCloser(strings.NewReader("")), Header: h}, nil
@@ -178,15 +175,13 @@ func TestFetchTranslations_RetryAndRetryAfter(t *testing.T) {
 	}
 }
 
-// Test cache TTL logic: expired entries should not be returned.
 func TestCacheTTL_Expiry(t *testing.T) {
 	tmp := t.TempDir()
 	cacheFilePath = filepath.Join(tmp, "ncbi_cache.json")
 	cache = make(map[string]cachedEntry)
-	// set an old retrieved_at
 	cache["OLDACC"] = cachedEntry{Translation: "OLD", RetrievedAt: time.Now().Unix() - 100000}
 	cacheLoaded = true
-	SetCacheTTLSeconds(1) // 1 second TTL
+	SetCacheTTLSeconds(1)
 
 	if v, ok := getCached("OLDACC"); ok || v != "" {
 		t.Fatalf("expected OLDACC to be expired and not returned, got %v (ok=%v)", v, ok)
