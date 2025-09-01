@@ -1,0 +1,285 @@
+/* modern light theme styles */
+:root {
+    --bg: #ffffff;
+    --fg: #0b1220;
+    --muted: #6b7a86;
+    --card: #f6f8fa;
+    --accent: #2563eb;
+    /* blue-600 */
+    --accent-2: #0ea5a0;
+    /* teal */
+}
+
+* {
+    box-sizing: border-box
+}
+
+body {
+    margin: 0;
+    font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    background: var(--bg);
+    color: var(--fg);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+.container {
+    max-width: 1320px;
+    /* increase screen usage */
+    margin: 14px auto;
+    padding: 6px 8px;
+    /* slightly tighter */
+}
+
+.topnav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 0
+}
+
+.brand {
+    font-weight: 700;
+    font-size: 18px;
+    color: var(--accent)
+}
+
+.navlinks {
+    display: flex;
+    gap: 8px
+}
+
+.navlinks a {
+    color: var(--fg);
+    text-decoration: none;
+    padding: 8px 10px;
+    border-radius: 8px
+}
+
+.navlinks a.primary {
+    background: var(--accent);
+    color: white
+}
+
+.app {
+    --left-col: 320px;
+    /* default left column width */
+    --max-expand: 900px;
+    /* default maximum expansion for detail */
+    display: grid;
+    /* left column adapts between a minimum and the role-based preferred width */
+    grid-template-columns: minmax(220px, var(--left-col)) minmax(0, 1fr);
+    gap: 18px;
+    margin-top: 12px
+}
+
+.panel {
+    background: var(--card);
+    padding: 8px 10px;
+    border-radius: 8px;
+    overflow: visible;
+    /* allow panels to grow vertically instead of scrolling */
+}
+
+.left {
+    min-height: 0;
+    /* let content determine height so it adapts */
+}
+
+.right {
+    min-height: 0;
+}
+
+
+.list {
+    max-height: none;
+    overflow: visible;
+    /* do not show scrollbars; allow the list to expand vertically */
+}
+
+.item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px;
+    border-radius: 8px;
+    border: 1px solid #eef3fb;
+    background: white;
+    text-decoration: none;
+    color: inherit;
+    margin-bottom: 8px
+}
+
+.item:hover {
+    box-shadow: 0 4px 14px rgba(16, 24, 40, 0.06)
+}
+
+.code {
+    background: #f1f5f9;
+    padding: 6px 8px;
+    border-radius: 6px;
+    font-weight: 700
+}
+
+.meta {
+    color: var(--muted);
+    font-size: 13px
+}
+
+.item .item-body {
+    display: block;
+    flex: 1 1 auto;
+    min-width: 0;
+    /* allow content to shrink and wrap */
+}
+
+.item .item-name {
+    font-weight: 600;
+    word-break: break-word;
+    white-space: normal;
+    /* allow wrapping */
+}
+
+.badge {
+    font-size: 12px;
+    color: var(--muted)
+}
+
+.actions {
+    display: flex;
+    gap: 8px;
+    align-items: center
+}
+
+.btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--accent-2);
+    color: white;
+    padding: 8px 12px;
+    border-radius: 10px;
+    border: none;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 14px;
+    line-height: 1;
+    box-shadow: 0 1px 0 rgba(16, 24, 40, 0.03);
+    transition: transform 120ms ease, box-shadow 120ms ease, background-color 120ms ease;
+}
+
+.btn:focus {
+    outline: 3px solid rgba(37, 99, 235, 0.12);
+    outline-offset: 2px;
+}
+
+.btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 18px rgba(16, 24, 40, 0.08);
+}
+
+.btn.secondary {
+    background: transparent;
+    color: var(--accent);
+    border: 1px solid #e6eef6;
+    padding: 7px 10px;
+    border-radius: 8px;
+}
+
+/* primary variant for important actions */
+.btn.primary {
+    background: var(--accent);
+    color: #fff
+}
+
+/* small icon helper */
+.btn .icon {
+    font-size: 13px;
+    opacity: 0.9
+}
+
+/* search form removed: styles intentionally omitted */
+
+pre {
+    background: #f8fafc;
+    padding: 10px;
+    border-radius: 8px;
+    overflow: visible;
+    /* don't show scrollbars; allow pre to wrap */
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+table.jobs {
+    width: 100%;
+    border-collapse: collapse;
+    background: transparent
+}
+
+table.jobs th,
+table.jobs td {
+    padding: 10px;
+    border-bottom: 1px solid #eef3fb;
+    text-align: left
+}
+
+table.jobs th {
+    color: var(--muted);
+    font-size: 13px
+}
+
+@media(max-width:880px) {
+    .app {
+        grid-template-columns: 1fr
+    }
+}
+
+/* Role-based layout tweaks: smaller expansion for guest, more for researchers/admins */
+body[data-role="guest"] .container {
+    max-width: 980px;
+}
+
+body[data-role="guest"] .app {
+    --left-col: 300px;
+    --max-expand: 780px;
+}
+
+body[data-role="researcher"] .container {
+    max-width: 1200px;
+}
+
+body[data-role="researcher"] .app {
+    --left-col: 360px;
+    --max-expand: 980px;
+}
+
+body[data-role="admin"] .container {
+    max-width: 1400px;
+}
+
+body[data-role="admin"] .app {
+    --left-col: 420px;
+    --max-expand: 1100px;
+}
+
+/* Ensure main detail area respects max expansion */
+.right {
+    max-width: var(--max-expand);
+}
+
+.item-main {
+    display: flex;
+    flex-direction: column;
+    gap: 6px
+}
+
+.item-name {
+    font-weight: 600
+}
+
+.item-name-small {
+    font-weight: 500;
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.1
+}

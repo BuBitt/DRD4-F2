@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="pt-BR">
+
+<head>
+    <meta charset="utf-8" />
+    <title>DRD4 — Visualização</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link href="/static/styles.css" rel="stylesheet" />
+</head>
+
+<body data-role="{{.Role}}">
+    <div class="container">
+        <header class="topnav">
+            <div class="brand">DRD4 Explorer</div>
+            <nav class="navlinks">
+                <a href="/">Home</a>
+                <a href="/psipred-jobs" class="primary">PSIPRED Jobs</a>
+            </nav>
+        </header>
+
+        <div class="app">
+            <aside class="left panel">
+                <h3 style="margin:6px 0">Variantes</h3>
+                <!-- Search form removed per UI request -->
+                <div class="list" id="variants">
+                    {{ template "variants.html" .Variants }}
+                </div>
+                <div class="meta" style="margin-top:8px">Mostrando {{len .Variants}} variantes</div>
+            </aside>
+
+            <main class="right panel">
+                <div id="detail" style="padding:8px">Selecione uma variante para ver detalhes — ou abra um link direto.
+                </div>
+            </main>
+        </div>
+    </div>
+    <script src="/static/app.js" defer></script>
+</body>
+
+</html>

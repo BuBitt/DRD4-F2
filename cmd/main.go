@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,17 +18,45 @@ import (
 	"drd4/internal/config"
 	"drd4/internal/fasta"
 	"drd4/internal/ncbi"
+	"drd4/internal/psipred"
 	"drd4/internal/translator"
 
 	"github.com/charmbracelet/log"
 )
 
-// version is the program version. It can be			UnsubstitutedPositions []string `json:"unsubstituted_positions,omitempty"`overridden at build time with -ldflags "-X main.version=..."
+// version is the program version. It can be overridden at build time with -ldflags "-X main.version=..."
 var version = "0.1.0"
 
 // ReferenceHeader is the FASTA header used as the canonical reference during merges.
 // Adjust this value to match the header present in your input FASTA when merging.
 const ReferenceHeader = "NM_000797.4 Homo sapiens dopamine receptor D4 (DRD4), mRNA"
+
+// PsipredJob representa um job salvo para monitoramento/retomada
+type PsipredJob struct {
+	UUID        string `json:"uuid"`
+	VariantCode string `json:"variant_code"`
+	State       string `json:"state"`
+}
+
+func loadPsipredJobs(path string) ([]PsipredJob, error) {
+	var out []PsipredJob
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return out, err
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+func savePsipredJobs(path string, jobs []PsipredJob) error {
+	data, err := json.MarshalIndent(jobs, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
 
 // timestampWriter prefixes each flushed line with an RFC3339 timestamp.
 type timestampWriter struct {
@@ -56,8 +85,6 @@ func (t *timestampWriter) Write(p []byte) (int, error) {
 	return total, nil
 }
 
-// terminalWriter wraps an io.Writer and exposes an Fd method so libraries that
-// inspect the file descriptor (for TTY detection) can work with wrapped writers.
 type terminalWriter struct {
 	w  io.Writer
 	fd uintptr
@@ -76,6 +103,12 @@ func main() {
 	externalFlag := flag.Bool("external", false, "habilitar tradutor externo como fallback (transeq/seqkit)")
 	alignerFlag := flag.String("aligner", "mafft", "alinhador a usar: \"mafft\" ou \"clustalw\"")
 	mafftArgs := flag.String("mafft-args", "--auto", "argumentos adicionais para mafft (entre aspas)")
+	psipredFlag := flag.Bool("psipred", false, "enviar sequências para a API PSIPRED (usa campo translate_merged_ref)")
+	psipredBase := flag.String("psipred-base", "https://bioinf.cs.ucl.ac.uk/psipred/api", "URL base da API PSIPRED")
+	psipredEmail := flag.String("psipred-email", "", "email para submissão ao PSIPRED (obrigatório se --psipred)")
+	psipredPoll := flag.Int("psipred-poll", 30, "intervalo de polling em segundos (mín 30s recomendado)")
+	psipredJobs := flag.String("psipred-jobs", "psipred_jobs.json", "arquivo para persistir fila/estado de jobs PSIPRED")
+	psipredResume := flag.Bool("psipred-resume", false, "retomar polling de jobs previamente salvos no arquivo de jobs")
 	dryRun := flag.Bool("dry-run", false, "executar sem gravar saídas ou chamar ferramentas externas")
 	verbose := flag.Bool("verbose", false, "habilitar logs verbosos (debug)")
 	versionFlag := flag.Bool("version", false, "imprimir versão e sair")
@@ -116,6 +149,8 @@ func main() {
 		cfg.Aligner = *alignerFlag
 	}
 
+	// ...continued
+
 	// initialize file vars used by legacy logic
 	filename := ""
 	var data []byte
@@ -155,6 +190,61 @@ func main() {
 	tw := &timestampWriter{w: loggerOut}
 	termW := &terminalWriter{w: tw, fd: os.Stderr.Fd()}
 	logger := log.New(termW)
+
+	// If user requested to resume PSIPRED jobs, load and poll them, then exit
+	if psipredResume != nil && *psipredResume {
+		jobs, lerr := loadPsipredJobs(*psipredJobs)
+		if lerr != nil {
+			logger.Error("failed to load psipred jobs", "path", *psipredJobs, "err", lerr)
+		} else {
+			logger.Info("resuming psipred jobs", "count", len(jobs))
+			var wg sync.WaitGroup
+			for _, job := range jobs {
+				if strings.EqualFold(job.State, "Complete") {
+					continue
+				}
+				wg.Add(1)
+				go func(j PsipredJob) {
+					defer wg.Done()
+					pollCtx, pollCancel := context.WithTimeout(context.Background(), 60*time.Minute)
+					defer pollCancel()
+					for {
+						select {
+						case <-pollCtx.Done():
+							logger.Warn("psipred resume poll timeout", "uuid", j.UUID)
+							return
+						case <-time.After(time.Duration(*psipredPoll) * time.Second):
+							reqURL := strings.TrimRight(*psipredBase, "/") + "/submission/" + j.UUID
+							req, _ := http.NewRequestWithContext(pollCtx, "GET", reqURL, nil)
+							req.Header.Set("Accept", "application/json")
+							resp, err := http.DefaultClient.Do(req)
+							if err != nil {
+								logger.Warn("psipred resume poll request failed", "err", err)
+								continue
+							}
+							body, _ := io.ReadAll(resp.Body)
+							resp.Body.Close()
+							var m map[string]interface{}
+							if err := json.Unmarshal(body, &m); err != nil {
+								logger.Warn("psipred resume parse failed", "err", err)
+								continue
+							}
+							state := ""
+							if s, ok := m["state"].(string); ok {
+								state = s
+							}
+							logger.Info("psipred resume status", "uuid", j.UUID, "state", state)
+							if strings.EqualFold(state, "Complete") || strings.EqualFold(state, "Error") {
+								return
+							}
+						}
+					}
+				}(job)
+			}
+			wg.Wait()
+		}
+		return
+	}
 
 	// apply log level from flags/config (flags override config)
 	if *verbose {
@@ -332,6 +422,7 @@ func main() {
 		type Variant struct {
 			Name                   string   `json:"name"`
 			VariantCode            string   `json:"variant_code"`
+			PsipredUUID            string   `json:"psipred_uuid,omitempty"`
 			PBCount                int      `json:"pb_count,omitempty"`
 			AACount                int      `json:"aa_count,omitempty"`
 			TranslationSource      string   `json:"translation_source,omitempty"`
@@ -745,6 +836,96 @@ func main() {
 					}
 				}
 				logger.Info("wrote FASTA file", "path", fastaPath, "variants", len(variants))
+			}
+
+			// If user requested PSIPRED integration, submit sequences and store UUIDs
+			if psipredFlag != nil && *psipredFlag {
+				if psipredEmail == nil || *psipredEmail == "" {
+					logger.Error("--psipred requires --psipred-email to be set; skipping PSIPRED submissions")
+				} else {
+					logger.Info("submitting sequences to PSIPRED", "base", *psipredBase)
+					// semaphore to cap concurrent submissions to 10
+					sem := make(chan struct{}, 10)
+					var wg sync.WaitGroup
+					for i := range variants {
+						if variants[i].TranslateMergedRef == "" {
+							continue
+						}
+						wg.Add(1)
+						go func(idx int) {
+							defer wg.Done()
+							sem <- struct{}{}
+							defer func() { <-sem }()
+
+							fastaBytes := []byte(fmt.Sprintf(">%s\n%s\n", variants[idx].VariantCode, variants[idx].TranslateMergedRef))
+							ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+							defer cancel()
+							uuid, err := psipred.SubmitJob(ctx, *psipredBase, "psipred", variants[idx].VariantCode, *psipredEmail, fastaBytes, nil)
+							if err != nil {
+								logger.Error("psipred submit failed", "variant", variants[idx].VariantCode, "err", err)
+								return
+							}
+							variants[idx].PsipredUUID = uuid
+							logger.Info("psipred submitted", "variant", variants[idx].VariantCode, "uuid", uuid)
+
+							// optional: basic polling until Complete/Error (respect interval, min 30s)
+							pollSec := 30
+							if psipredPoll != nil && *psipredPoll > 0 {
+								pollSec = *psipredPoll
+								if pollSec < 30 {
+									pollSec = 30
+								}
+							}
+							pollCtx, pollCancel := context.WithTimeout(context.Background(), 60*time.Minute)
+							defer pollCancel()
+							// poll loop
+							for {
+								select {
+								case <-pollCtx.Done():
+									logger.Warn("psipred poll timeout", "variant", variants[idx].VariantCode, "uuid", uuid)
+									return
+								case <-time.After(time.Duration(pollSec) * time.Second):
+									// check status
+									reqURL := strings.TrimRight(*psipredBase, "/") + "/submission/" + uuid
+									req, _ := http.NewRequestWithContext(pollCtx, "GET", reqURL, nil)
+									req.Header.Set("Accept", "application/json")
+									resp, err := http.DefaultClient.Do(req)
+									if err != nil {
+										logger.Warn("psipred poll request failed", "err", err)
+										continue
+									}
+									body, _ := io.ReadAll(resp.Body)
+									resp.Body.Close()
+									var m map[string]interface{}
+									if err := json.Unmarshal(body, &m); err != nil {
+										logger.Warn("psipred poll parse failed", "err", err)
+										continue
+									}
+									state := ""
+									if s, ok := m["state"].(string); ok {
+										state = s
+									}
+									if strings.EqualFold(state, "Complete") {
+										logger.Info("psipred job complete", "variant", variants[idx].VariantCode, "uuid", uuid)
+										return
+									}
+									if strings.EqualFold(state, "Error") {
+										logger.Warn("psipred job error", "variant", variants[idx].VariantCode, "uuid", uuid, "msg", m["last_message"])
+										return
+									}
+								}
+							}
+						}(i)
+					}
+					wg.Wait()
+					// after submissions/polls, rewrite JSON with UUIDs
+					jsonData2, _ := json.MarshalIndent(variants, "", "  ")
+					if err := os.WriteFile(outPath, jsonData2, 0o644); err != nil {
+						logger.Error("failed to write output JSON with psipred uuids", "path", outPath, "err", err)
+					} else {
+						logger.Info("wrote output JSON with psipred uuids", "path", outPath)
+					}
+				}
 			}
 		}
 	} else {

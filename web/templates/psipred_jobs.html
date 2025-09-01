@@ -1,0 +1,56 @@
+{{/* psipred_jobs.html - simple jobs table */}}
+<!doctype html>
+<html lang="pt-BR">
+
+<head>
+    <meta charset="utf-8" />
+    <title>PSIPRED Jobs — DRD4</title>
+    <link href="/static/styles.css" rel="stylesheet" />
+</head>
+
+<body>
+    <div class="container">
+        <header class="topnav">
+            <div class="brand">DRD4 Explorer</div>
+            <nav class="navlinks">
+                <a href="/">Home</a>
+                <a href="/psipred-jobs" class="primary">PSIPRED Jobs</a>
+            </nav>
+        </header>
+
+        <main class="panel" style="margin-top:12px">
+            <h2>PSIPRED Jobs</h2>
+            <p class="meta">Acompanhamento simples dos jobs registrados no database.json</p>
+
+            {{ if . }}
+            <table class="jobs">
+                <thead>
+                    <tr>
+                        <th>UUID</th>
+                        <th>Variant</th>
+                        <th>PB</th>
+                        <th>AA</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{ range . }}
+                    <tr>
+                        <td>{{ .PsipredUUID }}</td>
+                        <td><a href="/variant/{{ .VariantCode }}">{{ .VariantCode }}</a></td>
+                        <td>{{ .PBCount }}</td>
+                        <td>{{ .AACount }}</td>
+                        <td><a class="btn secondary" href="/psipred/job/{{ .PsipredUUID }}">Ver</a></td>
+                    </tr>
+                    {{ end }}
+                </tbody>
+            </table>
+            {{ else }}
+            <div class="meta">Nenhum job PSIPRED encontrado.</div>
+            {{ end }}
+
+        </main>
+    </div>
+</body>
+
+</html>

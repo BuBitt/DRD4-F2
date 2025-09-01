@@ -1,0 +1,57 @@
+{{/* detail.html - single clean fragment for a variant */}}
+<div class="panel">
+    <div class="detail-title">
+        <h2 style="margin:0">{{.VariantCode}}</h2>
+        <div class="meta">— {{.Name}}</div>
+    </div>
+
+    <p class="meta" style="margin-top:8px"><strong>Fonte:</strong> {{.TranslationSource}} • <strong>PB:</strong>
+        {{.PBCount}} • <strong>AA:</strong> {{.AACount}}</p>
+
+    <section class="actions" style="margin-top:12px">
+        <form method="get" action="/variant/{{.VariantCode}}" style="display:inline">
+            <button class="btn secondary" type="submit">Atualizar</button>
+        </form>
+        <form method="post" action="/psipred/submit/{{.VariantCode}}" style="display:inline">
+            <button class="btn" type="submit">Enviar PSIPRED</button>
+        </form>
+        {{if .PsipredUUID}}
+        <a class="btn secondary" href="/psipred/job/{{.PsipredUUID}}">Ver job</a>
+        <div id="psipred-status" class="badge" style="margin-left:6px">UUID: {{.PsipredUUID}}</div>
+        {{else}}
+        <div id="psipred-status" style="margin-left:6px; color:var(--muted)"></div>
+        {{end}}
+    </section>
+
+    {{if .UnsubstitutedPositions}}
+    <div style="margin-top:12px">
+        <strong>Posições não substituídas</strong>
+        <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap">
+            {{- range .UnsubstitutedPositions}}
+            <div style="background:#fff;padding:6px 8px;border-radius:8px;border:1px solid #eef3fb;font-size:13px">{{.}}
+            </div>
+            {{- end}}
+        </div>
+    </div>
+    {{end}}
+
+    <div style="margin-top:12px; display:flex; gap:8px; align-items:center">
+        <button class="btn secondary"
+            onclick="(function(){navigator.clipboard.writeText('{{.TranslateMergedRef}}')})()">Copiar
+            TranslateMergedRef</button>
+        <a class="btn secondary" href="data:text/plain;charset=utf-8,{{urlquery .TranslateMergedRef}}"
+            download="{{.VariantCode}}_translate.fasta">Baixar FASTA</a>
+    </div>
+
+    <h3 style="margin-top:16px">Nucleotídeos</h3>
+    <pre>{{.Nucleotides}}</pre>
+
+    <h3>Traduzido</h3>
+    <pre>{{.Translated}}</pre>
+
+    <h3>Alinhamento</h3>
+    <pre>{{.NucleotidesAlign}}</pre>
+
+    <h3 style="margin-top:12px">TranslateMergedRef</h3>
+    <pre>{{.TranslateMergedRef}}</pre>
+</div>

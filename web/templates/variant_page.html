@@ -1,0 +1,18 @@
+{{/* variant_page.html - full page for a single variant */}}
+<!doctype html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <title>{{.VariantCode}} — DRD4</title>
+    <link href="/static/styles.css" rel="stylesheet" />
+</head>
+
+<body>
+    <div style="max-width:1100px;margin:24px auto;padding:18px;">
+        <a href="/">← Voltar para lista</a>
+        {{ template "detail.html" . }}
+    </div>
+</body>
+
+</html>
