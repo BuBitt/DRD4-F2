@@ -22,12 +22,15 @@
 
         <div class="app">
             <aside class="left panel">
-                <h3 style="margin:6px 0">Variantes</h3>
+                <!-- Title and count on the same line -->
+                <h3 style="margin:6px 0; display:flex; align-items:center; gap:8px">Variantes
+                    <span class="meta" style="font-size:13px; margin-left:6px">Mostrando {{len .Variants}}
+                        variantes</span>
+                </h3>
                 <!-- Search form removed per UI request -->
                 <div class="list" id="variants">
                     {{ template "variants.html" .Variants }}
                 </div>
-                <div class="meta" style="margin-top:8px">Mostrando {{len .Variants}} variantes</div>
             </aside>
 
             <main class="right panel">
