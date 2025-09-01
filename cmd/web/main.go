@@ -14,9 +14,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
+	"database/sql"
 	"drd4/internal/psipred"
+
+	_ "modernc.org/sqlite"
 )
 
 type Variant struct {
@@ -43,6 +47,112 @@ type VariantsPage struct {
 }
 
 var templates *template.Template
+
+// PSIPRED job persistence
+type PsipredJob struct {
+	ID          string    `json:"id"`
+	VariantCode string    `json:"variant_code"`
+	RemoteUUID  string    `json:"remote_uuid,omitempty"`
+	State       string    `json:"state"` // queued, submitting, submitted, polling, complete, error
+	Message     string    `json:"message,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+var jobsPath string
+var jobsMu sync.Mutex
+var jobsStore string // "json" or "sqlite"
+var jobsDB *sql.DB
+var pollInterval time.Duration
+var pollTimeout time.Duration
+
+func loadJobs(path string) ([]PsipredJob, error) {
+	if jobsStore == "sqlite" {
+		// load from sqlite
+		var out []PsipredJob
+		if jobsDB == nil {
+			return out, fmt.Errorf("sqlite db not initialized")
+		}
+		rows, err := jobsDB.Query("SELECT id, variant_code, remote_uuid, state, message, created_at, updated_at FROM jobs ORDER BY created_at DESC")
+		if err != nil {
+			return out, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var j PsipredJob
+			var created, updated string
+			if err := rows.Scan(&j.ID, &j.VariantCode, &j.RemoteUUID, &j.State, &j.Message, &created, &updated); err != nil {
+				return out, err
+			}
+			j.CreatedAt, _ = time.Parse(time.RFC3339, created)
+			j.UpdatedAt, _ = time.Parse(time.RFC3339, updated)
+			out = append(out, j)
+		}
+		return out, nil
+	}
+	var out []PsipredJob
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return out, nil
+		}
+		return out, err
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+func saveJobs(path string, jobs []PsipredJob) error {
+	if jobsStore == "sqlite" {
+		if jobsDB == nil {
+			return fmt.Errorf("sqlite db not initialized")
+		}
+		tx, err := jobsDB.Begin()
+		if err != nil {
+			return err
+		}
+		// clear and insert
+		if _, err := tx.Exec("DELETE FROM jobs"); err != nil {
+			tx.Rollback()
+			return err
+		}
+		stmt, err := tx.Prepare("INSERT INTO jobs(id, variant_code, remote_uuid, state, message, created_at, updated_at) VALUES(?,?,?,?,?,?,?)")
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+		defer stmt.Close()
+		for _, j := range jobs {
+			if _, err := stmt.Exec(j.ID, j.VariantCode, j.RemoteUUID, j.State, j.Message, j.CreatedAt.Format(time.RFC3339), j.UpdatedAt.Format(time.RFC3339)); err != nil {
+				tx.Rollback()
+				return err
+			}
+		}
+		return tx.Commit()
+	}
+	data, err := json.MarshalIndent(jobs, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+// helper to persist job update safely
+func persistJobUpdate(path string, update func([]PsipredJob) ([]PsipredJob, error)) error {
+	jobsMu.Lock()
+	defer jobsMu.Unlock()
+	jobs, err := loadJobs(path)
+	if err != nil {
+		return err
+	}
+	jobs, err = update(jobs)
+	if err != nil {
+		return err
+	}
+	return saveJobs(path, jobs)
+}
 
 func loadTemplates(dir string) error {
 	t := template.New("")
@@ -294,23 +404,172 @@ func psipredSubmitHandler(dbPath, psipredBase, psipredEmail string) http.Handler
 			http.Error(w, "variant sem TranslateMergedRef", http.StatusBadRequest)
 			return
 		}
+		// create a persisted job record (queued) and return job ID immediately
 		fasta := fmt.Sprintf(">%s\n%s\n", variants[idx].VariantCode, seq)
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
-		defer cancel()
-		uuid, err := psipred.SubmitJob(ctx, psipredBase, "psipred", variants[idx].VariantCode, psipredEmail, []byte(fasta), nil)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("psipred submit failed: %v", err), http.StatusInternalServerError)
+		jobID := fmt.Sprintf("job-%d-%d", time.Now().UnixNano(), os.Getpid())
+		job := PsipredJob{
+			ID:          jobID,
+			VariantCode: variants[idx].VariantCode,
+			State:       "queued",
+			CreatedAt:   time.Now(),
+			UpdatedAt:   time.Now(),
+		}
+		// persist job
+		if err := persistJobUpdate(jobsPath, func(js []PsipredJob) ([]PsipredJob, error) {
+			js = append(js, job)
+			return js, nil
+		}); err != nil {
+			http.Error(w, "failed to persist job", http.StatusInternalServerError)
 			return
 		}
-		// persist uuid back to database
-		variants[idx].PsipredUUID = uuid
-		out, _ := json.MarshalIndent(variants, "", "  ")
-		if err := os.WriteFile(dbPath, out, 0644); err != nil {
-			log.Printf("warning: failed to write database.json: %v", err)
-		}
-		// return a small fragment with status and uuid
+
+		// background submit: do not block request
+		go func(j PsipredJob, fastaBytes []byte) {
+			// mark submitting
+			_ = persistJobUpdate(jobsPath, func(js []PsipredJob) ([]PsipredJob, error) {
+				for i := range js {
+					if js[i].ID == j.ID {
+						js[i].State = "submitting"
+						js[i].UpdatedAt = time.Now()
+					}
+				}
+				return js, nil
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancel()
+			uuid, err := psipred.SubmitJob(ctx, psipredBase, "psipred", j.VariantCode, psipredEmail, fastaBytes, nil)
+			if err != nil {
+				_ = persistJobUpdate(jobsPath, func(js []PsipredJob) ([]PsipredJob, error) {
+					for i := range js {
+						if js[i].ID == j.ID {
+							js[i].State = "error"
+							js[i].Message = err.Error()
+							js[i].UpdatedAt = time.Now()
+						}
+					}
+					return js, nil
+				})
+				return
+			}
+			// update job with remote uuid and mark submitted
+			_ = persistJobUpdate(jobsPath, func(js []PsipredJob) ([]PsipredJob, error) {
+				for i := range js {
+					if js[i].ID == j.ID {
+						js[i].RemoteUUID = uuid
+						js[i].State = "submitted"
+						js[i].UpdatedAt = time.Now()
+					}
+				}
+				return js, nil
+			})
+			// optional: start polling and update state to complete/error (light polling)
+			pollCtx, pollCancel := context.WithTimeout(context.Background(), pollTimeout)
+			defer pollCancel()
+			for {
+				select {
+				case <-pollCtx.Done():
+					_ = persistJobUpdate(jobsPath, func(js []PsipredJob) ([]PsipredJob, error) {
+						for i := range js {
+							if js[i].ID == j.ID {
+								js[i].State = "error"
+								js[i].Message = "poll timeout"
+								js[i].UpdatedAt = time.Now()
+							}
+						}
+						return js, nil
+					})
+					return
+				case <-time.After(pollInterval):
+					// query remote status
+					reqURL := strings.TrimRight(psipredBase, "/") + "/submission/" + uuid
+					cli := &http.Client{Timeout: 20 * time.Second}
+					resp, err := cli.Get(reqURL)
+					if err != nil {
+						continue
+					}
+					body, _ := io.ReadAll(resp.Body)
+					resp.Body.Close()
+					var m map[string]interface{}
+					if err := json.Unmarshal(body, &m); err != nil {
+						continue
+					}
+					state := ""
+					if s, ok := m["state"].(string); ok {
+						state = s
+					}
+					if strings.EqualFold(state, "Complete") {
+						_ = persistJobUpdate(jobsPath, func(js []PsipredJob) ([]PsipredJob, error) {
+							for i := range js {
+								if js[i].ID == j.ID {
+									js[i].State = "complete"
+									js[i].UpdatedAt = time.Now()
+								}
+							}
+							return js, nil
+						})
+						return
+					}
+					if strings.EqualFold(state, "Error") {
+						_ = persistJobUpdate(jobsPath, func(js []PsipredJob) ([]PsipredJob, error) {
+							for i := range js {
+								if js[i].ID == j.ID {
+									js[i].State = "error"
+									if v, ok := m["last_message"].(string); ok {
+										js[i].Message = v
+									}
+									js[i].UpdatedAt = time.Now()
+								}
+							}
+							return js, nil
+						})
+						return
+					}
+				}
+			}
+		}(job, []byte(fasta))
+
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"uuid": uuid})
+		_ = json.NewEncoder(w).Encode(map[string]string{"job_id": jobID})
+	}
+}
+
+// api to fetch job status by job id
+func apiPsipredJobHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// extract last path segment as job id
+		p := strings.TrimSuffix(r.URL.Path, "/")
+		idx := strings.LastIndex(p, "/")
+		if idx < 0 || idx+1 >= len(p) {
+			http.Error(w, "missing job id", http.StatusBadRequest)
+			return
+		}
+		id := p[idx+1:]
+		jobs, err := loadJobs(jobsPath)
+		if err != nil {
+			http.Error(w, "failed to read jobs", http.StatusInternalServerError)
+			return
+		}
+		for _, j := range jobs {
+			if j.ID == id {
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				_ = json.NewEncoder(w).Encode(j)
+				return
+			}
+		}
+		http.Error(w, "job not found", http.StatusNotFound)
+	}
+}
+
+// api to list persisted jobs
+func apiPsipredJobsListHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		jobs, err := loadJobs(jobsPath)
+		if err != nil {
+			http.Error(w, "failed to read jobs", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(jobs)
 	}
 }
 
@@ -413,7 +672,53 @@ func main() {
 	psipredBase := flag.String("psipred-base", "https://bioinf.cs.ucl.ac.uk/psipred/api", "URL base da API PSIPRED")
 	psipredEmail := flag.String("psipred-email", "", "email para submissão ao PSIPRED (opcional para UI)")
 	logFile := flag.String("log", "", "path to write access logs (optional). If empty, logs go to stdout only")
+	psipredJobsFlag := flag.String("psipred-jobs", "psipred_jobs.json", "arquivo para persistir estados de jobs PSIPRED")
+	jobsStoreFlag := flag.String("psipred-store", "json", "psipred jobs store: 'json' or 'sqlite'")
+	pollSec := flag.Int("psipred-poll-sec", 30, "intervalo de polling (segundos) para checar status remoto")
+	pollTimeoutMin := flag.Int("psipred-poll-timeout-min", 60, "timeout de polling (minutos) para aguardar job")
+	webFlag := flag.Bool("web", false, "run with sensible web defaults (sqlite store, poll=10s, timeout=30m, access.log)")
 	flag.Parse()
+
+	// If --web is provided, override relevant flags to production defaults
+	if webFlag != nil && *webFlag {
+		*jobsStoreFlag = "sqlite"
+		*psipredJobsFlag = "psipred_jobs.db"
+		*pollSec = 10
+		*pollTimeoutMin = 30
+		if *logFile == "" {
+			*logFile = "access.log"
+		}
+		// note: addr and templates keep their values unless explicitly changed
+	}
+
+	jobsStore = strings.ToLower(strings.TrimSpace(*jobsStoreFlag))
+	if jobsStore != "json" && jobsStore != "sqlite" {
+		log.Fatalf("invalid psipred-store: %s", *jobsStoreFlag)
+	}
+	jobsPath = *psipredJobsFlag
+	pollInterval = time.Duration(*pollSec) * time.Second
+	pollTimeout = time.Duration(*pollTimeoutMin) * time.Minute
+	// initialize sqlite if requested
+	if jobsStore == "sqlite" {
+		db, err := sql.Open("sqlite", jobsPath)
+		if err != nil {
+			log.Fatalf("failed to open sqlite db: %v", err)
+		}
+		jobsDB = db
+		// create schema if not exists
+		_, err = jobsDB.Exec(`CREATE TABLE IF NOT EXISTS jobs (
+			id TEXT PRIMARY KEY,
+			variant_code TEXT,
+			remote_uuid TEXT,
+			state TEXT,
+			message TEXT,
+			created_at TEXT,
+			updated_at TEXT
+		)`)
+		if err != nil {
+			log.Fatalf("failed to ensure jobs table: %v", err)
+		}
+	}
 
 	if err := loadTemplates(*templatesDir); err != nil {
 		log.Fatalf("failed to load templates: %v", err)
@@ -433,6 +738,10 @@ func main() {
 	// API endpoints for SPA-like interactions
 	mux.HandleFunc("/api/variant/", apiVariantHandler(*dbPath))
 	mux.HandleFunc("/api/psipred/jobs", apiPsipredJobsHandler(*dbPath))
+	// job persistence APIs
+	jobsPath = *psipredJobsFlag
+	mux.HandleFunc("/api/psipred/job/", apiPsipredJobHandler())
+	mux.HandleFunc("/api/psipred/jobs/list", apiPsipredJobsListHandler())
 
 	// configure logger
 	var out io.Writer = os.Stdout

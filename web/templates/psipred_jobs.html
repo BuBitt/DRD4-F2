@@ -26,21 +26,25 @@
             <table class="jobs">
                 <thead>
                     <tr>
-                        <th>UUID</th>
+                        <th>Job ID</th>
                         <th>Variant</th>
-                        <th>PB</th>
-                        <th>AA</th>
+                        <th>Remote UUID</th>
+                        <th>Status</th>
                         <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody>
                     {{ range . }}
                     <tr>
-                        <td>{{ .PsipredUUID }}</td>
+                        <td><code>{{ .ID }}</code></td>
                         <td><a href="/variant/{{ .VariantCode }}">{{ .VariantCode }}</a></td>
-                        <td>{{ .PBCount }}</td>
-                        <td>{{ .AACount }}</td>
-                        <td><a class="btn secondary" href="/psipred/job/{{ .PsipredUUID }}">Ver</a></td>
+                        <td>{{ if .RemoteUUID }}<a href="/psipred/job/{{ .RemoteUUID }}">{{ .RemoteUUID }}</a>{{ else
+                            }}—{{ end }}</td>
+                        <td><span class="badge">{{ .State }}</span></td>
+                        <td>
+                            <a class="btn secondary view-link" href="/psipred/job/{{ or .RemoteUUID .ID }}">Ver</a>
+                            <button class="btn" data-job-id="{{.ID}}">Status</button>
+                        </td>
                     </tr>
                     {{ end }}
                 </tbody>
@@ -50,6 +54,19 @@
             {{ end }}
 
         </main>
+    </div>
+    <!-- Modal for job details -->
+    <div id="job-modal" class="modal" aria-hidden="true" role="dialog" aria-labelledby="job-modal-title">
+        <div class="modal-backdrop" data-dismiss="modal"></div>
+        <div class="modal-panel">
+            <header class="modal-header">
+                <h3 id="job-modal-title">Job details</h3>
+                <button class="btn secondary" id="modal-close">Fechar</button>
+            </header>
+            <div class="modal-body" id="job-modal-body">
+                <pre id="job-modal-pre">Carregando...</pre>
+            </div>
+        </div>
     </div>
 </body>
 

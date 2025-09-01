@@ -5,22 +5,31 @@
         <div class="meta">— {{.Name}}</div>
     </div>
 
-    <p class="meta" style="margin-top:8px"><strong>Fonte:</strong> {{.TranslationSource}} • <strong>PB:</strong>
-        {{.PBCount}} • <strong>AA:</strong> {{.AACount}}</p>
+    <p class="meta" style="margin-top:8px">
+        <strong>Fonte:</strong> {{.TranslationSource}} • <strong>PB:</strong> {{.PBCount}} • <strong>AA:</strong>
+        {{.AACount}}
+        {{if .PsipredUUID}} • <strong>UUID:</strong> <code>{{.PsipredUUID}}</code>{{end}}
+        <span id="psipred-status" style="margin-left:8px; color:var(--muted)"></span>
+    </p>
 
-    <section class="actions" style="margin-top:12px">
-        <form method="get" action="/variant/{{.VariantCode}}" style="display:inline">
+    <section class="actions" style="margin-top:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+        <form method="get" action="/variant/{{.VariantCode}}">
             <button class="btn secondary" type="submit">Atualizar</button>
         </form>
-        <form method="post" action="/psipred/submit/{{.VariantCode}}" style="display:inline">
-            <button class="btn" type="submit">Enviar PSIPRED</button>
-        </form>
         {{if .PsipredUUID}}
-        <a class="btn secondary" href="/psipred/job/{{.PsipredUUID}}">Ver job</a>
-        <div id="psipred-status" class="badge" style="margin-left:6px">UUID: {{.PsipredUUID}}</div>
+        <!-- If the variant already has a PSIPRED UUID, show a direct link to the PSIPRED site -->
+        <a class="btn primary" href="https://bioinf.cs.ucl.ac.uk/psipred/&uuid={{.PsipredUUID}}" target="_blank"
+            rel="noopener">Acessar PSIPRED</a>
         {{else}}
-        <div id="psipred-status" style="margin-left:6px; color:var(--muted)"></div>
+        <form method="post" action="/psipred/submit/{{.VariantCode}}">
+            <button class="btn primary" type="submit">Enviar PSIPRED</button>
+        </form>
         {{end}}
+        <button class="btn secondary"
+            onclick="(function(){navigator.clipboard.writeText('{{js .TranslateMergedRef}}')})()">Copiar
+            TranslateMergedRef</button>
+        <a class="btn secondary" href="data:text/plain;charset=utf-8,{{urlquery .TranslateMergedRef}}"
+            download="{{.VariantCode}}_translate.fasta">Baixar FASTA</a>
     </section>
 
     {{if .UnsubstitutedPositions}}
@@ -35,13 +44,7 @@
     </div>
     {{end}}
 
-    <div style="margin-top:12px; display:flex; gap:8px; align-items:center">
-        <button class="btn secondary"
-            onclick="(function(){navigator.clipboard.writeText('{{.TranslateMergedRef}}')})()">Copiar
-            TranslateMergedRef</button>
-        <a class="btn secondary" href="data:text/plain;charset=utf-8,{{urlquery .TranslateMergedRef}}"
-            download="{{.VariantCode}}_translate.fasta">Baixar FASTA</a>
-    </div>
+    <!-- copy / download moved into actions row -->
 
     <h3 style="margin-top:16px">Nucleotídeos</h3>
     <pre>{{.Nucleotides}}</pre>

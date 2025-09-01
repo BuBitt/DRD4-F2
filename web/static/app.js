@@ -30,6 +30,24 @@
                 await loadVariantDetail(href)
             })
         })
+        // attach view/status buttons on jobs table if present
+        document.querySelectorAll('button[data-job-id]').forEach(btn => {
+            btn.addEventListener('click', async function (ev) {
+                ev.preventDefault()
+                const id = this.getAttribute('data-job-id')
+                openJobModal(id)
+            })
+        })
+        document.querySelectorAll('a.view-link').forEach(a => {
+            a.addEventListener('click', function (ev) {
+                // allow normal navigation but also open modal if same-origin
+                ev.preventDefault()
+                const href = a.getAttribute('href')
+                // if it's a remote uuid link, open modal with the id
+                const last = href.split('/').pop()
+                openJobModal(last)
+            })
+        })
     }
 
     async function loadVariantDetail(path) {
@@ -52,9 +70,13 @@
                 const old = btn.textContent
                 btn.disabled = true; btn.textContent = 'Enviando...'
                 try {
+                    // server now returns { job_id: "..." }
                     const data = await fetchJSON(action, { method: 'POST' })
                     btn.textContent = 'Enviado'
-                    pollJob(data.uuid)
+                    if (data && data.job_id) {
+                        // poll internal API for job state
+                        pollInternalJob(data.job_id)
+                    }
                 } catch (err) {
                     btn.textContent = 'Erro'
                     console.error(err)
@@ -74,6 +96,105 @@
         } catch (e) { console.error(e) }
     }
 
+    async function pollInternalJob(id) {
+        try {
+            const el = document.getElementById('psipred-status')
+            el && (el.textContent = 'Acompanhando job interno...')
+            const res = await fetch('/api/psipred/job/' + id)
+            if (!res.ok) { el && (el.textContent = 'Erro ao consultar job'); return }
+            const data = await res.json()
+            el && (el.textContent = JSON.stringify(data))
+            // if not final, poll again in 8s
+            if (data.state && (data.state === 'queued' || data.state === 'submitting' || data.state === 'submitted' || data.state === 'polling')) {
+                setTimeout(() => pollInternalJob(id), 8000)
+            }
+        } catch (e) { console.error(e) }
+    }
+
+    // Modal helpers
+    function openJobModal(id) {
+        const modal = document.getElementById('job-modal')
+        const pre = document.getElementById('job-modal-pre')
+        modal && modal.setAttribute('aria-hidden', 'false')
+        pre && (pre.textContent = 'Carregando...')
+        fetch('/api/psipred/job/' + id).then(async res => {
+            if (!res.ok) throw new Error('job not found')
+            const j = await res.json()
+            pre.textContent = JSON.stringify(j, null, 2)
+            // if job has remote uuid, fetch remote status as well
+            if (j.remote_uuid) {
+                try {
+                    const r = await fetch('/psipred/status/' + j.remote_uuid)
+                    if (r.ok) {
+                        const txt = await r.text()
+                        pre.textContent += '\n\n--- remote status ---\n' + txt
+                    }
+                } catch (e) { /* ignore */ }
+            }
+            // start polling internal job until final
+            if (j.state && (j.state === 'queued' || j.state === 'submitting' || j.state === 'submitted' || j.state === 'polling')) {
+                setTimeout(() => pollAndRefreshModal(id), 4000)
+            }
+        }).catch(err => { pre && (pre.textContent = 'Erro: ' + err.message) })
+    }
+
+    function closeJobModal() {
+        const modal = document.getElementById('job-modal')
+        if (!modal) return
+        modal.setAttribute('aria-hidden', 'true')
+    }
+
+    async function pollAndRefreshModal(id) {
+        try {
+            const res = await fetch('/api/psipred/job/' + id)
+            if (!res.ok) return
+            const j = await res.json()
+            const pre = document.getElementById('job-modal-pre')
+            if (pre) pre.textContent = JSON.stringify(j, null, 2)
+            if (j.state && (j.state === 'queued' || j.state === 'submitting' || j.state === 'submitted' || j.state === 'polling')) {
+                setTimeout(() => pollAndRefreshModal(id), 8000)
+            }
+        } catch (e) { /* swallow */ }
+    }
+
+    // auto-refresh jobs list on the jobs page
+    async function refreshJobsList() {
+        try {
+            const el = document.querySelector('table.jobs tbody')
+            if (!el) return
+            const res = await fetch('/api/psipred/jobs/list')
+            if (!res.ok) return
+            const data = await res.json()
+            // rebuild rows
+            el.innerHTML = ''
+            data.forEach(j => {
+                const tr = document.createElement('tr')
+                tr.innerHTML = `<td><code>${j.id}</code></td><td><a href="/variant/${j.variant_code}">${j.variant_code}</a></td><td>${j.remote_uuid ? `<a href="/psipred/job/${j.remote_uuid}">${j.remote_uuid}</a>` : '—'}</td><td><span class="badge">${j.state}</span></td><td><a class="btn secondary" href="/psipred/job/${j.remote_uuid || j.id}">Ver</a> <a class="btn" href="#" data-retry="${j.id}">Retry</a></td>`
+                el.appendChild(tr)
+            })
+            // wire retry buttons
+            document.querySelectorAll('a[data-retry]').forEach(a => {
+                a.addEventListener('click', async function (ev) {
+                    ev.preventDefault()
+                    const id = this.getAttribute('data-retry')
+                    // call internal API to get variant and trigger a re-submit
+                    try {
+                        const res = await fetch('/api/psipred/job/' + id)
+                        if (!res.ok) throw new Error('job not found')
+                        const job = await res.json()
+                        // call submit endpoint for the variant
+                        const resp = await fetch('/psipred/submit/' + job.variant_code, { method: 'POST' })
+                        if (!resp.ok) throw new Error('submit failed')
+                        alert('Retry triggered')
+                    } catch (e) { alert('retry failed: ' + e.message) }
+                })
+            })
+        } catch (e) { console.error(e) }
+    }
+
+    // if we are on the jobs page, refresh periodically
+    setInterval(refreshJobsList, 10000)
+
     // search form removed from UI; no client-side search wiring
 
     // handle back/forward
@@ -88,6 +209,9 @@
     attachDetailHandlers()
     // load variant if url points to one
     loadCurrentFromLocation()
+    // modal close handlers
+    document.getElementById('modal-close') && document.getElementById('modal-close').addEventListener('click', closeJobModal)
+    document.querySelectorAll('.modal-backdrop').forEach(b => b.addEventListener('click', closeJobModal))
 })()
 
     /* Role-aware UI constraints: read role from body and enforce max width for detail area
