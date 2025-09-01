@@ -23,7 +23,8 @@
             <p class="meta">Acompanhamento simples dos jobs registrados no database.json</p>
 
             {{ if . }}
-            <table class="jobs">
+            <table class="jobs" id="psipred-jobs-table" hx-get="/psipred-jobs/fragment" hx-trigger="every 30s"
+                hx-swap="outerHTML">
                 <thead>
                     <tr>
                         <th>Job ID</th>
@@ -33,14 +34,19 @@
                         <th>Actions</th>
                     </tr>
                 </thead>
-                <tbody>
+                <tbody id="psipred-jobs-tbody">
                     {{ range . }}
                     <tr>
                         <td><code>{{ .ID }}</code></td>
                         <td><a href="/variant/{{ .VariantCode }}">{{ .VariantCode }}</a></td>
                         <td>{{ if .RemoteUUID }}<a href="/psipred/job/{{ .RemoteUUID }}">{{ .RemoteUUID }}</a>{{ else
                             }}—{{ end }}</td>
-                        <td><span class="badge">{{ .State }}</span></td>
+                        <td>
+                            <span class="badge">{{ .State }}</span>
+                            {{ if .RemoteState }}
+                            <div class="remote-state">remote: <strong>{{ .RemoteState }}</strong></div>
+                            {{ end }}
+                        </td>
                         <td>
                             <a class="btn secondary view-link" href="/psipred/job/{{ or .RemoteUUID .ID }}">Ver</a>
                             <button class="btn" data-job-id="{{.ID}}">Status</button>

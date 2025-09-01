@@ -58,6 +58,7 @@ type PsipredJob struct {
 	State       string    `json:"state"` // queued, submitting, submitted, polling, complete, error
 	Message     string    `json:"message,omitempty"`
 	Email       string    `json:"email,omitempty"`
+	RemoteState string    `json:"remote_state,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
@@ -69,8 +70,78 @@ var jobsDB *sql.DB
 var pollInterval time.Duration
 var pollTimeout time.Duration
 
+// initJobsDB ensures the sqlite database file exists, opens a connection and ensures schema
+func initJobsDB(path string) error {
+	if jobsDB != nil {
+		return nil
+	}
+	// ensure parent directory exists
+	dir := filepath.Dir(path)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("failed to create jobs dir: %v", err)
+		}
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return fmt.Errorf("failed to open sqlite db: %v", err)
+	}
+	// set a reasonable busy timeout via pragmas to reduce errors on concurrent writes
+	if _, err := db.Exec("PRAGMA busy_timeout = 5000;"); err != nil {
+		// non-fatal
+	}
+	// create schema if not exists
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS jobs (
+			id TEXT PRIMARY KEY,
+			variant_code TEXT,
+			remote_uuid TEXT,
+			state TEXT,
+			message TEXT,
+			email TEXT,
+			created_at TEXT,
+			updated_at TEXT
+		)`)
+	if err != nil {
+		db.Close()
+		return fmt.Errorf("failed to ensure jobs table: %v", err)
+	}
+	// migrate existing table: ensure 'email' column exists
+	cols, err := db.Query("PRAGMA table_info(jobs);")
+	if err == nil {
+		found := false
+		for cols.Next() {
+			var cid int
+			var name, ctype string
+			var notnull, dfltValue, pk interface{}
+			_ = cols.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk)
+			if name == "email" {
+				found = true
+				break
+			}
+		}
+		cols.Close()
+		if !found {
+			if _, err := db.Exec("ALTER TABLE jobs ADD COLUMN email TEXT"); err != nil {
+				// log and continue
+				log.Printf("failed to add email column to jobs table: %v", err)
+			} else {
+				log.Printf("migrated jobs table: added email column")
+			}
+		}
+	}
+	jobsDB = db
+	return nil
+}
+
 func loadJobs(path string) ([]PsipredJob, error) {
 	if jobsStore == "sqlite" {
+		// ensure DB is initialized (creates file/table if necessary)
+		if jobsDB == nil {
+			if err := initJobsDB(path); err != nil {
+				var out []PsipredJob
+				return out, err
+			}
+		}
 		// load from sqlite
 		var out []PsipredJob
 		if jobsDB == nil {
@@ -113,6 +184,12 @@ func loadJobs(path string) ([]PsipredJob, error) {
 
 func saveJobs(path string, jobs []PsipredJob) error {
 	if jobsStore == "sqlite" {
+		// ensure DB is initialized (creates file/table if necessary)
+		if jobsDB == nil {
+			if err := initJobsDB(path); err != nil {
+				return err
+			}
+		}
 		if jobsDB == nil {
 			return fmt.Errorf("sqlite db not initialized")
 		}
@@ -194,6 +271,24 @@ func generateRandomEmail() string {
 		return fmt.Sprintf("user+%d@example.com", time.Now().UnixNano())
 	}
 	return fmt.Sprintf("user+%s@example.com", hex.EncodeToString(b))
+}
+
+// sanitizeSequence returns a cleaned sequence containing only A-Z letters (converted to uppercase).
+// This ensures we send only amino-acid single-letter codes to PSIPRED.
+func sanitizeSequence(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' {
+			b.WriteByte(byte(r - 'a' + 'A'))
+			continue
+		}
+		if r >= 'A' && r <= 'Z' {
+			b.WriteByte(byte(r))
+			continue
+		}
+		// ignore any other rune (digits, punctuation, whitespace)
+	}
+	return b.String()
 }
 
 // statusResponseWriter captures status and bytes written for logging
@@ -441,8 +536,14 @@ func psipredSubmitHandler(dbPath, psipredBase, psipredEmail string) http.Handler
 			http.Error(w, "variant sem TranslateMergedRef", http.StatusBadRequest)
 			return
 		}
+		// sanitize sequence to contain only amino-acid letters
+		clean := sanitizeSequence(seq)
+		if clean == "" {
+			http.Error(w, "variant TranslateMergedRef não contém aminoácidos válidos", http.StatusBadRequest)
+			return
+		}
 		// create a persisted job record (queued) and return job ID immediately
-		fasta := fmt.Sprintf(">%s\n%s\n", variants[idx].VariantCode, seq)
+		fasta := fmt.Sprintf(">%s\n%s\n", variants[idx].VariantCode, clean)
 		jobID := fmt.Sprintf("job-%d-%d", time.Now().UnixNano(), os.Getpid())
 		// generate random email per requirement and store with job
 		randEmail := generateRandomEmail()
@@ -499,11 +600,40 @@ func psipredSubmitHandler(dbPath, psipredBase, psipredEmail string) http.Handler
 						js[i].RemoteUUID = uuid
 						js[i].State = "submitted"
 						js[i].Email = j.Email
+						js[i].RemoteState = "submitted"
 						js[i].UpdatedAt = time.Now()
 					}
 				}
 				return js, nil
 			})
+			// Also persist the remote UUID into database.json for the matching variant
+			go func(uuid string, variantCode string, dbPath string) {
+				variants, err := readDatabase(dbPath)
+				if err != nil {
+					return
+				}
+				updated := false
+				for i := range variants {
+					if variants[i].VariantCode == variantCode {
+						variants[i].PsipredUUID = uuid
+						updated = true
+						break
+					}
+				}
+				if !updated {
+					return
+				}
+				// write back database.json (atomic write)
+				tmp := dbPath + ".tmp"
+				b, err := json.MarshalIndent(variants, "", "  ")
+				if err != nil {
+					return
+				}
+				if err := os.WriteFile(tmp, b, 0644); err != nil {
+					return
+				}
+				_ = os.Rename(tmp, dbPath)
+			}(uuid, j.VariantCode, dbPath)
 			// optional: start polling and update state to complete/error (light polling)
 			pollCtx, pollCancel := context.WithTimeout(context.Background(), pollTimeout)
 			defer pollCancel()
@@ -544,6 +674,7 @@ func psipredSubmitHandler(dbPath, psipredBase, psipredEmail string) http.Handler
 							for i := range js {
 								if js[i].ID == j.ID {
 									js[i].State = "complete"
+									js[i].RemoteState = "complete"
 									js[i].UpdatedAt = time.Now()
 								}
 							}
@@ -556,6 +687,7 @@ func psipredSubmitHandler(dbPath, psipredBase, psipredEmail string) http.Handler
 							for i := range js {
 								if js[i].ID == j.ID {
 									js[i].State = "error"
+									js[i].RemoteState = "error"
 									if v, ok := m["last_message"].(string); ok {
 										js[i].Message = v
 									}
@@ -643,7 +775,7 @@ func psipredStatusHandler(psipredBase string) http.HandlerFunc {
 }
 
 // psipredJobsHandler shows a simple table of variants that have a PSIPRED UUID
-func psipredJobsHandler(dbPath string) http.HandlerFunc {
+func psipredJobsHandler(dbPath string, psipredBase string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// load persisted jobs (JSON or sqlite) and render them
 		jobs, err := loadJobs(jobsPath)
@@ -652,6 +784,60 @@ func psipredJobsHandler(dbPath string) http.HandlerFunc {
 			http.Error(w, "failed to read psipred jobs", http.StatusInternalServerError)
 			return
 		}
+		// optionally, for entries that have RemoteUUID but no RemoteState, try a single quick probe
+		for i := range jobs {
+			if jobs[i].RemoteUUID != "" && jobs[i].RemoteState == "" {
+				reqURL := strings.TrimRight(psipredBase, "/") + "/submission/" + jobs[i].RemoteUUID
+				cli := &http.Client{Timeout: 5 * time.Second}
+				resp, err := cli.Get(reqURL)
+				if err == nil {
+					body, _ := io.ReadAll(resp.Body)
+					resp.Body.Close()
+					var m map[string]interface{}
+					if err := json.Unmarshal(body, &m); err == nil {
+						if s, ok := m["state"].(string); ok {
+							jobs[i].RemoteState = s
+						}
+					}
+				}
+			}
+		}
+		if err := templates.ExecuteTemplate(w, "psipred_jobs.html", jobs); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+}
+
+// fragment handler for HTMX to refresh only the jobs table
+func psipredJobsFragmentHandler(dbPath string, psipredBase string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		jobs, err := loadJobs(jobsPath)
+		if err != nil {
+			http.Error(w, "failed to read psipred jobs", http.StatusInternalServerError)
+			return
+		}
+		// fill RemoteState as above (single quick probe)
+		for i := range jobs {
+			if jobs[i].RemoteUUID != "" && jobs[i].RemoteState == "" {
+				reqURL := strings.TrimRight(psipredBase, "/") + "/submission/" + jobs[i].RemoteUUID
+				cli := &http.Client{Timeout: 5 * time.Second}
+				resp, err := cli.Get(reqURL)
+				if err == nil {
+					body, _ := io.ReadAll(resp.Body)
+					resp.Body.Close()
+					var m map[string]interface{}
+					if err := json.Unmarshal(body, &m); err == nil {
+						if s, ok := m["state"].(string); ok {
+							jobs[i].RemoteState = s
+						}
+					}
+				}
+			}
+		}
+		// render only the fragment - we reuse the same template but instruct callers to swap by outerHTML
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		// execute the whole template so it includes the table; HTMX will replace the element
 		if err := templates.ExecuteTemplate(w, "psipred_jobs.html", jobs); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -792,7 +978,8 @@ func main() {
 	mux.HandleFunc("/psipred/submit/", psipredSubmitHandler(*dbPath, *psipredBase, *psipredEmail))
 	mux.HandleFunc("/psipred/status/", psipredStatusHandler(*psipredBase))
 	mux.HandleFunc("/psipred/job/", psipredJobHandler(*dbPath))
-	mux.HandleFunc("/psipred-jobs", psipredJobsHandler(*dbPath))
+	mux.HandleFunc("/psipred-jobs", psipredJobsHandler(*dbPath, *psipredBase))
+	mux.HandleFunc("/psipred-jobs/fragment", psipredJobsFragmentHandler(*dbPath, *psipredBase))
 	// API endpoints for SPA-like interactions
 	mux.HandleFunc("/api/variant/", apiVariantHandler(*dbPath))
 	mux.HandleFunc("/api/psipred/jobs", apiPsipredJobsHandler(*dbPath))
