@@ -8,6 +8,7 @@ import (
 // Config holds runtime configuration loaded from a JSON file.
 // Fields map to keys expected in `config.json`.
 type Config struct {
+	Aligner               string `json:"aligner"`
 	InputFasta            string `json:"input_fasta"`
 	OutputJSON            string `json:"output_json"`
 	LogFile               string `json:"log_file"`

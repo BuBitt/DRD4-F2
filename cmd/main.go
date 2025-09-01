@@ -207,33 +207,109 @@ func main() {
 		records := fasta.ParseFasta(strings.NewReader(content))
 		logger.Info("parsed fasta", "path", filename, "records", len(records))
 
-		// Try to run MAFFT on the original FASTA file to get aligned sequences.
-		alignMap := make(map[string]string)
+		// Try to run ClustalW no FASTA original para obter sequências alinhadas.
+		var alignMap map[string]string
+		var ctx context.Context
+		var cancel context.CancelFunc
+		var args []string
+		var out []byte
+		alignMap = make(map[string]string)
 		if *dryRun {
-			logger.Info("dry-run: skipping mafft invocation")
-		} else if mpath, err := exec.LookPath("mafft"); err == nil {
-			logger.Debug("mafft path", "path", mpath)
-			logger.Info("mafft found, running alignment")
-			// run mafft with a 10-minute timeout and capture combined output
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-			start := time.Now()
-			// support passing additional args via --mafft-args (space separated)
-			args := append(strings.Fields(*mafftArgs), filename)
-			out, err := exec.CommandContext(ctx, mpath, args...).CombinedOutput()
-			dur := time.Since(start)
-			if err != nil {
-				logger.Error("mafft failed or timed out", "err", err, "duration_ms", dur.Milliseconds(), "out_size", len(out))
-			} else {
-				logger.Debug("mafft finished", "duration_ms", dur.Milliseconds(), "out_size", len(out))
-				aligned := fasta.ParseFasta(strings.NewReader(string(out)))
-				for _, a := range aligned {
-					alignMap[a.Header] = a.Sequence
+			logger.Info("dry-run: skipping alinhador externo")
+		} else if strings.ToLower(cfg.Aligner) == "clustalw" {
+			if cpath, err := exec.LookPath("clustalw"); err == nil {
+				logger.Debug("clustalw path", "path", cpath)
+				logger.Info("clustalw found, running alignment")
+				ctx, cancel = context.WithTimeout(context.Background(), 10*time.Minute)
+				defer cancel()
+				start := time.Now()
+				outFile := filename + ".aln"
+				args = []string{
+					"-INFILE=" + filename,
+					"-OUTPUT=FASTA",
+					"-OUTFILE=" + outFile,
 				}
-				logger.Info("mafft finished", "aligned_records", len(aligned))
+				out, err = exec.CommandContext(ctx, cpath, args...).CombinedOutput()
+				dur := time.Since(start)
+				if err != nil {
+					logger.Error("clustalw failed or timed out", "err", err, "duration_ms", dur.Milliseconds(), "out_size", len(out))
+				} else {
+					logger.Debug("clustalw finished", "duration_ms", dur.Milliseconds(), "out_size", len(out))
+					alignedData, err := os.ReadFile(outFile)
+					if err != nil {
+						logger.Error("failed to read clustalw output file", "err", err)
+					} else {
+						aligned := fasta.ParseFasta(strings.NewReader(string(alignedData)))
+						for _, a := range aligned {
+							alignMap[a.Header] = a.Sequence
+						}
+						logger.Info("clustalw finished", "aligned_records", len(aligned))
+					}
+					_ = os.Remove(outFile)
+				}
+			} else {
+				logger.Warn("clustalw not found in PATH; nucleotides_align field will contain unaligned sequence")
 			}
 		} else {
-			logger.Warn("mafft not found in PATH; nucleotides_align field will contain unaligned sequence")
+			if mpath, err := exec.LookPath("mafft"); err == nil {
+				logger.Debug("mafft path", "path", mpath)
+				logger.Info("mafft found, running alignment")
+				ctx, cancel = context.WithTimeout(context.Background(), 10*time.Minute)
+				defer cancel()
+				start := time.Now()
+				args = append(strings.Fields(*mafftArgs), filename)
+				out, err = exec.CommandContext(ctx, mpath, args...).CombinedOutput()
+				dur := time.Since(start)
+				if err != nil {
+					logger.Error("mafft failed or timed out", "err", err, "duration_ms", dur.Milliseconds(), "out_size", len(out))
+				} else {
+					logger.Debug("mafft finished", "duration_ms", dur.Milliseconds(), "out_size", len(out))
+					aligned := fasta.ParseFasta(strings.NewReader(string(out)))
+					for _, a := range aligned {
+						alignMap[a.Header] = a.Sequence
+					}
+					logger.Info("mafft finished", "aligned_records", len(aligned))
+				}
+			} else {
+				logger.Warn("mafft not found in PATH; nucleotides_align field will contain unaligned sequence")
+			}
+		}
+		// Tenta rodar ClustalW no FASTA original para obter sequências alinhadas.
+		alignMap = make(map[string]string)
+		if *dryRun {
+			logger.Info("dry-run: skipping clustalw invocation")
+		} else if cpath, err := exec.LookPath("clustalw"); err == nil {
+			logger.Debug("clustalw path", "path", cpath)
+			logger.Info("clustalw found, running alignment")
+			ctx, cancel = context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			start := time.Now()
+			outFile := filename + ".aln"
+			args = []string{
+				"-INFILE=" + filename,
+				"-OUTPUT=FASTA",
+				"-OUTFILE=" + outFile,
+			}
+			out, err = exec.CommandContext(ctx, cpath, args...).CombinedOutput()
+			dur := time.Since(start)
+			if err != nil {
+				logger.Error("clustalw failed or timed out", "err", err, "duration_ms", dur.Milliseconds(), "out_size", len(out))
+			} else {
+				logger.Debug("clustalw finished", "duration_ms", dur.Milliseconds(), "out_size", len(out))
+				alignedData, err := os.ReadFile(outFile)
+				if err != nil {
+					logger.Error("failed to read clustalw output file", "err", err)
+				} else {
+					aligned := fasta.ParseFasta(strings.NewReader(string(alignedData)))
+					for _, a := range aligned {
+						alignMap[a.Header] = a.Sequence
+					}
+					logger.Info("clustalw finished", "aligned_records", len(aligned))
+				}
+				_ = os.Remove(outFile)
+			}
+		} else {
+			logger.Warn("clustalw not found in PATH; nucleotides_align field will contain unaligned sequence")
 		}
 
 		type Variant struct {
@@ -460,35 +536,76 @@ func main() {
 			}
 			protTmp.Close()
 
-			// Run MAFFT on protein FASTA (required by request)
-			mpath, merr := exec.LookPath("mafft")
-			if merr != nil {
-				logger.Fatal("mafft not found in PATH; protein alignment required")
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-			args := append(strings.Fields(*mafftArgs), protTmp.Name())
-			out, err := exec.CommandContext(ctx, mpath, args...).CombinedOutput()
-			if err != nil {
-				logger.Fatal("mafft protein alignment failed", "err", err, "output", string(out))
-			}
-			alignedProt := fasta.ParseFasta(strings.NewReader(string(out)))
-
-			// map aligned proteins back to variants
-			for _, ap := range alignedProt {
-				// header format: index|variant
-				parts := strings.SplitN(ap.Header, "|", 2)
-				if len(parts) < 1 {
-					continue
+			var alignedProt []fasta.FastaRecord
+			if strings.ToLower(cfg.Aligner) == "clustalw" {
+				cpath, cerr := exec.LookPath("clustalw")
+				if cerr != nil {
+					logger.Fatal("clustalw not found in PATH; protein alignment required")
 				}
-				idx := 0
-				fmt.Sscanf(parts[0], "%d", &idx)
-				if idx >= 0 && idx < len(variants) {
-					variants[idx].TranslateAlign = ap.Sequence
+				ctx, cancel = context.WithTimeout(context.Background(), 10*time.Minute)
+				defer cancel()
+				outFile := protTmp.Name() + ".aln"
+				args = []string{
+					"-INFILE=" + protTmp.Name(),
+					"-OUTPUT=FASTA",
+					"-OUTFILE=" + outFile,
 				}
-			}
+				out, err = exec.CommandContext(ctx, cpath, args...).CombinedOutput()
+				if err != nil {
+					logger.Fatal("clustalw protein alignment failed", "err", err, "output", string(out))
+				}
+				alignedProtData, err := os.ReadFile(outFile)
+				if err != nil {
+					logger.Fatal("failed to read clustalw protein output file", "err", err)
+				}
+				alignedProt = fasta.ParseFasta(strings.NewReader(string(alignedProtData)))
 
-			_ = os.Remove(protTmp.Name())
+				// mapear proteínas alinhadas de volta para variants
+				for _, ap := range alignedProt {
+					// header format: index|variant
+					parts := strings.SplitN(ap.Header, "|", 2)
+					if len(parts) < 1 {
+						continue
+					}
+					idx := 0
+					fmt.Sscanf(parts[0], "%d", &idx)
+					if idx >= 0 && idx < len(variants) {
+						variants[idx].TranslateAlign = ap.Sequence
+					}
+				}
+
+				_ = os.Remove(protTmp.Name())
+				_ = os.Remove(outFile)
+			} else {
+				mpath, merr := exec.LookPath("mafft")
+				if merr != nil {
+					logger.Fatal("mafft not found in PATH; protein alignment required")
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+				defer cancel()
+				args := append(strings.Fields(*mafftArgs), protTmp.Name())
+				out, err := exec.CommandContext(ctx, mpath, args...).CombinedOutput()
+				if err != nil {
+					logger.Fatal("mafft protein alignment failed", "err", err, "output", string(out))
+				}
+				alignedProt := fasta.ParseFasta(strings.NewReader(string(out)))
+
+				// map aligned proteins back to variants
+				for _, ap := range alignedProt {
+					// header format: index|variant
+					parts := strings.SplitN(ap.Header, "|", 2)
+					if len(parts) < 1 {
+						continue
+					}
+					idx := 0
+					fmt.Sscanf(parts[0], "%d", &idx)
+					if idx >= 0 && idx < len(variants) {
+						variants[idx].TranslateAlign = ap.Sequence
+					}
+				}
+
+				_ = os.Remove(protTmp.Name())
+			}
 		}
 
 		// Identify reference aligned translation (use first variant matching ReferenceHeader or 0)

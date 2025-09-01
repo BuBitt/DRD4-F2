@@ -6,5 +6,6 @@
     "ncbi_cache_path": "./ncbi_cache",
     "ncbi_api_key": "YOUR_API_KEY",
     "ncbi_cache_ttl_seconds": 604800,
-    "use_external_translator": false
+    "use_external_translator": false,
+    "aligner": "mafft" // ou "clustalw"
 }
