@@ -12,13 +12,7 @@
 
 <body data-role="{{.Role}}">
     <div class="container">
-        <header class="topnav">
-            <div class="brand">DRD4 Explorer</div>
-            <nav class="navlinks">
-                <a href="/">Home</a>
-                <a href="/psipred-jobs" class="primary">PSIPRED Jobs</a>
-            </nav>
-        </header>
+        {{ template "header.html" . }}
 
         <div class="app">
             <aside class="left panel">

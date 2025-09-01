@@ -236,7 +236,8 @@
             el.innerHTML = ''
             data.forEach(j => {
                 const tr = document.createElement('tr')
-                tr.innerHTML = `<td><code>${j.id}</code></td><td><a href="/variant/${j.variant_code}">${j.variant_code}</a></td><td>${j.remote_uuid ? `<a href="/psipred/job/${j.remote_uuid}">${j.remote_uuid}</a>` : '—'}</td><td><span class="badge">${j.state}</span></td><td><a class="btn secondary" href="/psipred/job/${j.remote_uuid || j.id}">Ver</a> <a class="btn" href="#" data-retry="${j.id}">Retry</a></td>`
+                const status = j.remote_state && j.remote_state !== '' ? j.remote_state : j.state
+                tr.innerHTML = `<td><code>${j.id}</code></td><td><a href="/variant/${j.variant_code}">${j.variant_code}</a></td><td>${j.remote_uuid ? `<a href="/psipred/job/${j.remote_uuid}">${j.remote_uuid}</a>` : '—'}</td><td><span class="badge">${status}</span></td><td><a class="btn secondary" href="/psipred/job/${j.remote_uuid || j.id}">Ver</a> <a class="btn" href="#" data-retry="${j.id}">Retry</a></td>`
                 el.appendChild(tr)
             })
             // wire retry buttons

@@ -10,32 +10,84 @@
     /* teal */
 }
 
-* {
-    box-sizing: border-box
-}
-
+/* Global typography */
 body {
     margin: 0;
-    font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    font-family: "Inter", "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.5;
     background: var(--bg);
     color: var(--fg);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
 }
 
-.container {
-    max-width: 1320px;
-    /* increase screen usage */
-    margin: 14px auto;
-    padding: 6px 8px;
-    /* slightly tighter */
+/* Headings */
+h1,
+h2,
+h3,
+h4 {
+    margin: 0 0 8px 0;
+    font-weight: 700;
+    color: var(--fg);
+    line-height: 1.15;
+}
+
+h1 {
+    font-size: 20px;
+}
+
+h2 {
+    font-size: 18px;
+}
+
+h3 {
+    font-size: 16px;
+}
+
+
+.nav-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    border-radius: 12px;
+    text-decoration: none;
+    font-weight: 600;
+    color: var(--fg);
+    background: rgba(255, 255, 255, 0.6);
+    border: 1px solid rgba(15, 23, 42, 0.04);
+    box-shadow: 0 1px 0 rgba(16, 24, 40, 0.03);
+    transition: transform 140ms ease, box-shadow 140ms ease, background-color 140ms ease, border-color 140ms ease;
+}
+
+.nav-btn.primary {
+    background: linear-gradient(180deg, var(--accent) 0%, color-mix(in srgb, var(--accent) 85%, white 15%) 100%);
+    color: white;
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    box-shadow: 0 6px 18px rgba(37, 99, 235, 0.12);
+}
+
+.nav-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 30px rgba(16, 24, 40, 0.08);
+}
+
+.nav-btn:active {
+    transform: translateY(0);
+    box-shadow: 0 4px 10px rgba(16, 24, 40, 0.06);
+}
+
+.nav-btn:focus {
+    outline: none;
+    box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.10);
 }
 
 .topnav {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 12px 0
+    padding: 12px 0;
 }
 
 .brand {
@@ -61,6 +113,14 @@ body {
     color: white
 }
 
+/* Page container: center content and provide global padding so pages don't stick to the left */
+.container {
+    box-sizing: border-box;
+    width: 100%;
+    margin: 0 auto;
+    padding: 20px;
+}
+
 .app {
     --left-col: 320px;
     /* default left column width */
@@ -75,7 +135,7 @@ body {
 
 .panel {
     background: var(--card);
-    padding: 8px 10px;
+    padding: 16px 18px;
     border-radius: 8px;
     overflow: visible;
     /* allow panels to grow vertically instead of scrolling */

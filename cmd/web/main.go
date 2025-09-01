@@ -70,6 +70,29 @@ var jobsDB *sql.DB
 var pollInterval time.Duration
 var pollTimeout time.Duration
 
+// PollerInfo holds runtime information about a poller for a given remote UUID
+type PollerInfo struct {
+	Cancel     context.CancelFunc `json:"-"`
+	JobID      string             `json:"job_id"`
+	StartedAt  time.Time          `json:"started_at"`
+	AcquiredAt *time.Time         `json:"acquired_at,omitempty"`
+	Status     string             `json:"status"` // waiting, running
+}
+
+var jobsPollers = map[string]*PollerInfo{}
+var jobsPollersMu sync.Mutex
+
+// semaphore to limit concurrent pollers
+var pollerSem chan struct{}
+var pollerMax int
+
+// audit log path for state change events
+var auditLogPath string = "psipred_audit.log"
+var auditMu sync.Mutex
+var auditMaxBytes int64 = 10 * 1024 * 1024 // 10 MB
+var auditMaxBackups int = 5
+var psipredBaseURL string
+
 // initJobsDB ensures the sqlite database file exists, opens a connection and ensures schema
 func initJobsDB(path string) error {
 	if jobsDB != nil {
@@ -231,9 +254,43 @@ func persistJobUpdate(path string, update func([]PsipredJob) ([]PsipredJob, erro
 	if err != nil {
 		return err
 	}
+	// keep a shallow copy of old states to detect changes for audit
+	oldMap := map[string]PsipredJob{}
+	for _, j := range jobs {
+		oldMap[j.ID] = j
+	}
 	jobs, err = update(jobs)
 	if err != nil {
 		return err
+	}
+	// detect state/message changes and append to audit log
+	for _, nj := range jobs {
+		if oj, ok := oldMap[nj.ID]; ok {
+			if oj.State != nj.State || oj.Message != nj.Message {
+				// log change to the audit file (JSON line)
+				entry := map[string]interface{}{
+					"timestamp":    time.Now().Format(time.RFC3339),
+					"job_id":       nj.ID,
+					"variant_code": nj.VariantCode,
+					"from_state":   oj.State,
+					"to_state":     nj.State,
+					"from_message": oj.Message,
+					"to_message":   nj.Message,
+				}
+				// write asynchronously but protected by a mutex for file safety
+				go auditAppend(entry)
+			}
+		} else {
+			// new job created — record creation event
+			entry := map[string]interface{}{
+				"timestamp":    time.Now().Format(time.RFC3339),
+				"job_id":       nj.ID,
+				"variant_code": nj.VariantCode,
+				"event":        "created",
+				"state":        nj.State,
+			}
+			go auditAppend(entry)
+		}
 	}
 	return saveJobs(path, jobs)
 }
@@ -653,6 +710,9 @@ func psipredSubmitHandler(dbPath, psipredBase, psipredEmail string) http.Handler
 				}
 				_ = os.Rename(tmp, dbPath)
 			}(uuid, j.VariantCode, dbPath)
+
+			// start a background poller for this job (if not already running)
+			startJobPoller(uuid, j.ID)
 			// optional: start polling and update state to complete/error (light polling)
 			pollCtx, pollCancel := context.WithTimeout(context.Background(), pollTimeout)
 			defer pollCancel()
@@ -763,6 +823,336 @@ func apiPsipredJobsListHandler() http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		_ = json.NewEncoder(w).Encode(jobs)
+	}
+}
+
+// startJobPoller begins polling remote PSIPRED for the given remote UUID and ties it to local jobID.
+// It ensures only one poller runs per remote UUID.
+func startJobPoller(remoteUUID, jobID string) {
+	jobsPollersMu.Lock()
+	if _, ok := jobsPollers[remoteUUID]; ok {
+		jobsPollersMu.Unlock()
+		return
+	}
+	// create cancellable context
+	ctx, cancel := context.WithCancel(context.Background())
+	pi := &PollerInfo{Cancel: cancel, JobID: jobID, StartedAt: time.Now(), Status: "waiting"}
+	jobsPollers[remoteUUID] = pi
+	jobsPollersMu.Unlock()
+
+	// audit: record poller registration
+	go func(uuid, jid string) {
+		auditMu.Lock()
+		defer auditMu.Unlock()
+		e := map[string]interface{}{"timestamp": time.Now().Format(time.RFC3339), "event": "poller_registered", "remote_uuid": uuid, "job_id": jid}
+		b, _ := json.Marshal(e)
+		f, err := os.OpenFile(auditLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err == nil {
+			_, _ = f.Write(append(b, '\n'))
+			f.Close()
+		}
+	}(remoteUUID, jobID)
+
+	go func() {
+		// on exit, remove poller entry and audit
+		defer func() {
+			jobsPollersMu.Lock()
+			delete(jobsPollers, remoteUUID)
+			jobsPollersMu.Unlock()
+			// audit poller stopped
+			go func(uuid, jid string) {
+				auditMu.Lock()
+				defer auditMu.Unlock()
+				e := map[string]interface{}{"timestamp": time.Now().Format(time.RFC3339), "event": "poller_stopped", "remote_uuid": uuid, "job_id": jid}
+				b, _ := json.Marshal(e)
+				f, err := os.OpenFile(auditLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+				if err == nil {
+					_, _ = f.Write(append(b, '\n'))
+					f.Close()
+				}
+			}(remoteUUID, jobID)
+		}()
+
+		cli := &http.Client{Timeout: 20 * time.Second}
+
+		// Acquire semaphore to limit concurrent pollers if configured
+		acquired := false
+		if pollerSem != nil {
+			select {
+			case pollerSem <- struct{}{}:
+				acquired = true
+				now := time.Now()
+				jobsPollersMu.Lock()
+				if p, ok := jobsPollers[remoteUUID]; ok {
+					p.AcquiredAt = &now
+					p.Status = "running"
+				}
+				jobsPollersMu.Unlock()
+			case <-ctx.Done():
+				return
+			}
+			defer func() {
+				if acquired {
+					<-pollerSem
+				}
+			}()
+		} else {
+			// mark running immediately
+			jobsPollersMu.Lock()
+			if p, ok := jobsPollers[remoteUUID]; ok {
+				p.Status = "running"
+			}
+			jobsPollersMu.Unlock()
+		}
+
+		ticker := time.NewTicker(pollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				reqURL := strings.TrimRight(psipredBaseURL, "/") + "/submission/" + remoteUUID
+				resp, err := cli.Get(reqURL)
+				if err != nil {
+					continue
+				}
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				var m map[string]interface{}
+				if err := json.Unmarshal(body, &m); err != nil {
+					continue
+				}
+				state := ""
+				if s, ok := m["state"].(string); ok {
+					state = s
+				}
+				// persist remote state and update local state accordingly
+				_ = persistJobUpdate(jobsPath, func(js []PsipredJob) ([]PsipredJob, error) {
+					for i := range js {
+						if js[i].ID == jobID {
+							js[i].RemoteState = state
+							// map remote state to local state if final
+							if strings.EqualFold(state, "Complete") {
+								js[i].State = "complete"
+								js[i].UpdatedAt = time.Now()
+							} else if strings.EqualFold(state, "Error") {
+								js[i].State = "error"
+								js[i].UpdatedAt = time.Now()
+							} else {
+								js[i].State = "submitted"
+								js[i].UpdatedAt = time.Now()
+							}
+						}
+					}
+					return js, nil
+				})
+				if strings.EqualFold(state, "Complete") || strings.EqualFold(state, "Error") {
+					return
+				}
+			}
+		}
+	}()
+}
+
+// auditAppend writes a JSON entry to the audit log and rotates when size exceeds threshold
+func auditAppend(entry map[string]interface{}) {
+	auditMu.Lock()
+	defer auditMu.Unlock()
+	b, _ := json.Marshal(entry)
+	// ensure directory exists
+	if dir := filepath.Dir(auditLogPath); dir != "" && dir != "." {
+		_ = os.MkdirAll(dir, 0755)
+	}
+	// rotate if needed
+	if fi, err := os.Stat(auditLogPath); err == nil {
+		if fi.Size() >= auditMaxBytes {
+			// rotate: rename to .1, .2 ... keeping auditMaxBackups
+			for i := auditMaxBackups - 1; i >= 1; i-- {
+				older := fmt.Sprintf("%s.%d", auditLogPath, i)
+				newer := fmt.Sprintf("%s.%d", auditLogPath, i+1)
+				if _, err := os.Stat(older); err == nil {
+					_ = os.Rename(older, newer)
+				}
+			}
+			// move current to .1
+			_ = os.Rename(auditLogPath, fmt.Sprintf("%s.1", auditLogPath))
+		}
+	}
+	f, err := os.OpenFile(auditLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Printf("AUDIT-ERR: failed to open audit log: %v", err)
+		return
+	}
+	defer f.Close()
+	_, _ = f.Write(append(b, '\n'))
+}
+
+// admin page for pollers (full page)
+func pollersAdminHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// prepare view model with human-readable timestamps (same shape as fragment handler)
+		jobsPollersMu.Lock()
+		view := map[string]map[string]string{}
+		for uuid, p := range jobsPollers {
+			m := map[string]string{}
+			variant := resolveVariantFromJob(p.JobID)
+			if variant == "" {
+				variant = p.JobID
+			}
+			m["variant_id"] = variant
+			m["status"] = p.Status
+			if !p.StartedAt.IsZero() {
+				m["started_at"] = p.StartedAt.Format("2006-01-02 15:04:05")
+			} else {
+				m["started_at"] = "-"
+			}
+			if p.AcquiredAt != nil && !p.AcquiredAt.IsZero() {
+				m["acquired_at"] = p.AcquiredAt.Format("2006-01-02 15:04:05")
+			} else {
+				m["acquired_at"] = "-"
+			}
+			view[uuid] = m
+		}
+		jobsPollersMu.Unlock()
+		if err := templates.ExecuteTemplate(w, "pollers.html", view); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+}
+
+// fragment for HTMX to refresh pollers table
+func pollersFragmentHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		jobsPollersMu.Lock()
+		// prepare a human-friendly view model
+		view := map[string]map[string]string{}
+		for uuid, p := range jobsPollers {
+			m := map[string]string{}
+			variant := resolveVariantFromJob(p.JobID)
+			if variant == "" {
+				variant = p.JobID
+			}
+			m["variant_id"] = variant
+			m["status"] = p.Status
+			if !p.StartedAt.IsZero() {
+				m["started_at"] = p.StartedAt.Format("02 Jan 2006 15:04")
+				m["started_rel"] = humanAgo(p.StartedAt)
+			} else {
+				m["started_at"] = "-"
+				m["started_rel"] = "-"
+			}
+			if p.AcquiredAt != nil && !p.AcquiredAt.IsZero() {
+				m["acquired_at"] = p.AcquiredAt.Format("02 Jan 2006 15:04")
+				m["acquired_rel"] = humanAgo(*p.AcquiredAt)
+			} else {
+				m["acquired_at"] = "-"
+				m["acquired_rel"] = "-"
+			}
+			view[uuid] = m
+		}
+		jobsPollersMu.Unlock()
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := templates.ExecuteTemplate(w, "pollers_fragment.html", view); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+}
+
+// resolveVariantFromJob looks up persisted jobs to find the variant code for a job id.
+func resolveVariantFromJob(jobID string) string {
+	jobs, err := loadJobs(jobsPath)
+	if err != nil {
+		return ""
+	}
+	for _, j := range jobs {
+		if j.ID == jobID {
+			return j.VariantCode
+		}
+	}
+	return ""
+}
+
+// cancel a poller by remote UUID
+func cancelPollerHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(r.URL.Path, "/")
+		if len(parts) < 5 || parts[4] == "" {
+			http.Error(w, "missing uuid", http.StatusBadRequest)
+			return
+		}
+		uuid := parts[4]
+		jobsPollersMu.Lock()
+		pi, ok := jobsPollers[uuid]
+		jobsPollersMu.Unlock()
+		if !ok {
+			http.Error(w, "poller not found", http.StatusNotFound)
+			return
+		}
+		// cancel
+		if pi.Cancel != nil {
+			pi.Cancel()
+		}
+		// audit
+		go auditAppend(map[string]interface{}{"timestamp": time.Now().Format(time.RFC3339), "event": "poller_cancelled", "remote_uuid": uuid, "job_id": pi.JobID})
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// humanAgo returns a short Portuguese relative time like "agora", "há 3m", "há 1h".
+func humanAgo(t time.Time) string {
+	d := time.Since(t)
+	if d < time.Minute {
+		return "agora"
+	}
+	if d < time.Hour {
+		m := int(d.Minutes())
+		return fmt.Sprintf("há %dm", m)
+	}
+	if d < 24*time.Hour {
+		h := int(d.Hours())
+		return fmt.Sprintf("há %dh", h)
+	}
+	days := int(d.Hours() / 24)
+	return fmt.Sprintf("há %dd", days)
+}
+
+// api to list active pollers and semaphore status
+func apiPollersHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		jobsPollersMu.Lock()
+		out := map[string]map[string]interface{}{}
+		for uuid, p := range jobsPollers {
+			info := map[string]interface{}{
+				"job_id":     p.JobID,
+				"started_at": p.StartedAt.Format(time.RFC3339),
+				"status":     p.Status,
+			}
+			if p.AcquiredAt != nil {
+				info["acquired_at"] = p.AcquiredAt.Format(time.RFC3339)
+			}
+			out[uuid] = info
+		}
+		jobsPollersMu.Unlock()
+
+		// semaphore info
+		semInfo := map[string]interface{}{
+			"max_concurrent": pollerMax,
+		}
+		if pollerSem != nil {
+			semInfo["in_use"] = pollerMax - len(pollerSem)
+		} else {
+			semInfo["in_use"] = 0
+		}
+
+		resp := map[string]interface{}{
+			"pollers":   out,
+			"semaphore": semInfo,
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(resp)
 	}
 }
 
@@ -915,6 +1305,7 @@ func main() {
 	jobsStoreFlag := flag.String("psipred-store", "json", "psipred jobs store: 'json' or 'sqlite'")
 	pollSec := flag.Int("psipred-poll-sec", 30, "intervalo de polling (segundos) para checar status remoto")
 	pollTimeoutMin := flag.Int("psipred-poll-timeout-min", 60, "timeout de polling (minutos) para aguardar job")
+	pollersMax := flag.Int("psipred-pollers-max", 5, "maximo de pollers concorrentes (0 = ilimitado)")
 	webFlag := flag.Bool("web", false, "run with sensible web defaults (sqlite store, poll=10s, timeout=30m, access.log)")
 	flag.Parse()
 
@@ -937,6 +1328,10 @@ func main() {
 	jobsPath = *psipredJobsFlag
 	pollInterval = time.Duration(*pollSec) * time.Second
 	pollTimeout = time.Duration(*pollTimeoutMin) * time.Minute
+	pollerMax = *pollersMax
+	if pollerMax > 0 {
+		pollerSem = make(chan struct{}, pollerMax)
+	}
 	// initialize sqlite if requested
 	if jobsStore == "sqlite" {
 		db, err := sql.Open("sqlite", jobsPath)
@@ -1006,6 +1401,10 @@ func main() {
 	jobsPath = *psipredJobsFlag
 	mux.HandleFunc("/api/psipred/job/", apiPsipredJobHandler())
 	mux.HandleFunc("/api/psipred/jobs/list", apiPsipredJobsListHandler())
+	mux.HandleFunc("/api/psipred/pollers", apiPollersHandler())
+	mux.HandleFunc("/api/psipred/pollers/cancel/", cancelPollerHandler())
+	mux.HandleFunc("/pollers", pollersAdminHandler())
+	mux.HandleFunc("/pollers/fragment", pollersFragmentHandler())
 
 	// configure logger
 	var out io.Writer = os.Stdout
@@ -1020,6 +1419,18 @@ func main() {
 
 	// log PSIPRED config for debugging
 	logger.Printf("psipred.base=%q psipred.email=%q jobsStore=%q jobsPath=%q", *psipredBase, *psipredEmail, jobsStore, jobsPath)
+	psipredBaseURL = *psipredBase
+
+	// start pollers for jobs already persisted (if any)
+	if jobsStore != "json" || true {
+		if js, err := loadJobs(jobsPath); err == nil {
+			for _, j := range js {
+				if j.RemoteUUID != "" && !(strings.EqualFold(j.State, "complete") || strings.EqualFold(j.State, "error")) {
+					startJobPoller(j.RemoteUUID, j.ID)
+				}
+			}
+		}
+	}
 	// wrap mux with logging middleware
 	handler := loggingMiddleware(logger, mux)
 

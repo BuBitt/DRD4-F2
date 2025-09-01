@@ -1,0 +1,21 @@
+{{define "pollers_fragment.html"}}
+{{range $uuid, $p := .}}
+<tr>
+    <td>{{$p.variant_id}}</td>
+    <td>{{if $uuid}}<a href="/psipred/job/{{$uuid}}">{{$uuid}}</a>{{else}}—{{end}}</td>
+    <td>{{$p.started_at}} <div class="meta">{{$p.started_rel}}</div>
+    </td>
+    <td>{{$p.acquired_at}} <div class="meta">{{$p.acquired_rel}}</div>
+    </td>
+    <td><span class="badge">{{$p.status}}</span></td>
+    <td>
+        <button class="btn secondary" hx-post="/api/psipred/pollers/cancel/{{$uuid}}" hx-swap="none"
+            hx-confirm="Cancelar poller {{$uuid}}?">Cancelar</button>
+    </td>
+</tr>
+{{else}}
+<tr>
+    <td colspan="6">Nenhum poller ativo</td>
+</tr>
+{{end}}
+{{end}}

@@ -10,13 +10,7 @@
 
 <body>
     <div class="container">
-        <header class="topnav">
-            <div class="brand">DRD4 Explorer</div>
-            <nav class="navlinks">
-                <a href="/">Home</a>
-                <a href="/psipred-jobs" class="primary">PSIPRED Jobs</a>
-            </nav>
-        </header>
+        {{ template "header.html" . }}
 
         <main class="panel" style="margin-top:12px">
             <h2>PSIPRED Jobs</h2>
@@ -42,14 +36,15 @@
                         <td>{{ if .RemoteUUID }}<a href="/psipred/job/{{ .RemoteUUID }}">{{ .RemoteUUID }}</a>{{ else
                             }}—{{ end }}</td>
                         <td>
-                            <span class="badge">{{ .State }}</span>
+                            {{/* Prefer remote state if available, otherwise show local state */}}
+                            {{ $s := .State }}
                             {{ if .RemoteState }}
-                            <div class="remote-state">remote: <strong>{{ .RemoteState }}</strong></div>
+                            {{ $s = .RemoteState }}
                             {{ end }}
+                            <span class="badge">{{ $s }}</span>
                         </td>
                         <td>
                             <a class="btn secondary view-link" href="/psipred/job/{{ or .RemoteUUID .ID }}">Ver</a>
-                            <button class="btn" data-job-id="{{.ID}}">Status</button>
                         </td>
                     </tr>
                     {{ end }}

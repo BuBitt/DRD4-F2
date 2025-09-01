@@ -1,0 +1,45 @@
+{{define "pollers.html"}}
+<!doctype html>
+<html lang="pt-BR">
+
+<head>
+    <meta charset="utf-8" />
+    <title>Pollers — DRD4</title>
+    <link href="/static/styles.css" rel="stylesheet" />
+    <script src="https://unpkg.com/htmx.org@1.11.0"></script>
+</head>
+
+<body>
+    <div class="container">
+        {{ template "header.html" . }}
+
+        <main class="panel" style="margin-top:12px">
+            <h2>Pollers ativos</h2>
+            <p class="meta">Gerencie pollers ativos e cancele manualmente, se necessário.</p>
+
+            {{ if . }}
+            <table class="jobs" id="pollers-table" hx-get="/pollers/fragment" hx-trigger="every 10s"
+                hx-swap="outerHTML">
+                <thead>
+                    <tr>
+                        <th>Variante</th>
+                        <th>UUID remoto</th>
+                        <th>Iniciado em</th>
+                        <th>Adquirido em</th>
+                        <th>Status</th>
+                        <th>Ações</th>
+                    </tr>
+                </thead>
+                <tbody id="pollers-tbody">
+                    {{ template "pollers_fragment.html" . }}
+                </tbody>
+            </table>
+            {{ else }}
+            <div class="meta">Nenhum poller ativo.</div>
+            {{ end }}
+        </main>
+    </div>
+</body>
+
+</html>
+{{end}}
