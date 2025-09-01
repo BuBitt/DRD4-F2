@@ -22,7 +22,7 @@ import (
 	"github.com/charmbracelet/log"
 )
 
-// version is the program version. It can be overridden at build time with -ldflags "-X main.version=..."
+// version is the program version. It can be			UnsubstitutedPositions []string `json:"unsubstituted_positions,omitempty"`overridden at build time with -ldflags "-X main.version=..."
 var version = "0.1.0"
 
 // ReferenceHeader is the FASTA header used as the canonical reference during merges.
@@ -313,16 +313,17 @@ func main() {
 		}
 
 		type Variant struct {
-			Name               string `json:"name"`
-			VariantCode        string `json:"variant_code"`
-			PBCount            int    `json:"pb_count,omitempty"`
-			AACount            int    `json:"aa_count,omitempty"`
-			TranslationSource  string `json:"translation_source,omitempty"`
-			Nucleotides        string `json:"nucleotides"`
-			Translated         string `json:"translated,omitempty"`
-			NucleotidesAlign   string `json:"nucleotides_align"`
-			TranslateAlign     string `json:"translate_align,omitempty"`
-			TranslateMergedRef string `json:"translate_merged_ref,omitempty"`
+			Name                   string   `json:"name"`
+			VariantCode            string   `json:"variant_code"`
+			PBCount                int      `json:"pb_count,omitempty"`
+			AACount                int      `json:"aa_count,omitempty"`
+			TranslationSource      string   `json:"translation_source,omitempty"`
+			UnsubstitutedPositions []string `json:"unsubstituted_positions,omitempty"`
+			Nucleotides            string   `json:"nucleotides"`
+			Translated             string   `json:"translated,omitempty"`
+			NucleotidesAlign       string   `json:"nucleotides_align"`
+			TranslateAlign         string   `json:"translate_align,omitempty"`
+			TranslateMergedRef     string   `json:"translate_merged_ref,omitempty"`
 		}
 		var variants []Variant
 
@@ -617,6 +618,48 @@ func main() {
 			}
 		}
 		refAlign := variants[refIdx].TranslateAlign
+		refNucleotidesAlign := variants[refIdx].NucleotidesAlign
+
+		// Calculate unsubstituted positions for each variant
+		for i := range variants {
+			if i == refIdx {
+				// Reference has no unsubstituted positions
+				variants[i].UnsubstitutedPositions = []string{}
+				continue
+			}
+			var positions []int
+			va := variants[i].NucleotidesAlign
+			for j := 0; j < len(va) && j < len(refNucleotidesAlign); j++ {
+				if va[j] != refNucleotidesAlign[j] && va[j] != '-' && refNucleotidesAlign[j] != '-' {
+					positions = append(positions, j+1) // 1-based
+				}
+			}
+			// Group consecutive positions into ranges
+			var ranges []string
+			if len(positions) > 0 {
+				start := positions[0]
+				prev := positions[0]
+				for _, p := range positions[1:] {
+					if p == prev+1 {
+						prev = p
+					} else {
+						if start == prev {
+							ranges = append(ranges, fmt.Sprintf("%d", start))
+						} else {
+							ranges = append(ranges, fmt.Sprintf("%d_%d", start, prev))
+						}
+						start = p
+						prev = p
+					}
+				}
+				if start == prev {
+					ranges = append(ranges, fmt.Sprintf("%d", start))
+				} else {
+					ranges = append(ranges, fmt.Sprintf("%d_%d", start, prev))
+				}
+			}
+			variants[i].UnsubstitutedPositions = ranges
+		}
 
 		// Merge: for each variant, replace '-' in TranslateAlign with corresponding AA from refAlign
 		for i := range variants {
@@ -667,6 +710,24 @@ func main() {
 				logger.Error("failed to write output JSON", "path", outPath, "err", err)
 			} else {
 				logger.Info("wrote output JSON", "path", outPath, "variants", len(variants))
+			}
+
+			// Write FASTA file with translated_merged_ref, reference first
+			fastaPath := strings.TrimSuffix(outPath, ".json") + "_merged.fasta"
+			fastaFile, err := os.Create(fastaPath)
+			if err != nil {
+				logger.Error("failed to create FASTA file", "path", fastaPath, "err", err)
+			} else {
+				defer fastaFile.Close()
+				// Write reference first
+				fmt.Fprintf(fastaFile, ">%s\n%s\n", variants[refIdx].VariantCode, variants[refIdx].TranslateMergedRef)
+				// Write others
+				for i, v := range variants {
+					if i != refIdx && v.TranslateMergedRef != "" {
+						fmt.Fprintf(fastaFile, ">%s\n%s\n", v.VariantCode, v.TranslateMergedRef)
+					}
+				}
+				logger.Info("wrote FASTA file", "path", fastaPath, "variants", len(variants))
 			}
 		}
 	} else {
