@@ -273,22 +273,40 @@ func generateRandomEmail() string {
 	return fmt.Sprintf("user+%s@example.com", hex.EncodeToString(b))
 }
 
-// sanitizeSequence returns a cleaned sequence containing only A-Z letters (converted to uppercase).
-// This ensures we send only amino-acid single-letter codes to PSIPRED.
-func sanitizeSequence(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		if r >= 'a' && r <= 'z' {
-			b.WriteByte(byte(r - 'a' + 'A'))
+// cleanSequence extracts sequence lines from a possible FASTA-like input, removes any header
+// lines (those starting with '>'), concatenates the remaining lines, and keeps only the
+// 20 standard amino-acid letters ACDEFGHIKLMNPQRSTVWY (uppercase).
+func cleanSequence(s string) string {
+	// split into lines and ignore header lines
+	var raw strings.Builder
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
-		if r >= 'A' && r <= 'Z' {
-			b.WriteByte(byte(r))
+		if strings.HasPrefix(line, ">") {
+			// skip header
 			continue
 		}
-		// ignore any other rune (digits, punctuation, whitespace)
+		raw.WriteString(line)
 	}
-	return b.String()
+	// keep only allowed amino-acid letters
+	allowed := map[byte]bool{}
+	for _, c := range "ACDEFGHIKLMNPQRSTVWY" {
+		allowed[byte(c)] = true
+	}
+	var out strings.Builder
+	for i := 0; i < raw.Len(); i++ {
+		ch := raw.String()[i]
+		// uppercase letters
+		if ch >= 'a' && ch <= 'z' {
+			ch = ch - 'a' + 'A'
+		}
+		if allowed[ch] {
+			out.WriteByte(ch)
+		}
+	}
+	return out.String()
 }
 
 // statusResponseWriter captures status and bytes written for logging
@@ -537,13 +555,14 @@ func psipredSubmitHandler(dbPath, psipredBase, psipredEmail string) http.Handler
 			return
 		}
 		// sanitize sequence to contain only amino-acid letters
-		clean := sanitizeSequence(seq)
+		clean := cleanSequence(seq)
 		if clean == "" {
 			http.Error(w, "variant TranslateMergedRef não contém aminoácidos válidos", http.StatusBadRequest)
 			return
 		}
 		// create a persisted job record (queued) and return job ID immediately
-		fasta := fmt.Sprintf(">%s\n%s\n", variants[idx].VariantCode, clean)
+		// PSIPRED expects only the amino-acid sequence content (no FASTA header). Send only the sequence.
+		fasta := fmt.Sprintf("%s\n", clean)
 		jobID := fmt.Sprintf("job-%d-%d", time.Now().UnixNano(), os.Getpid())
 		// generate random email per requirement and store with job
 		randEmail := generateRandomEmail()

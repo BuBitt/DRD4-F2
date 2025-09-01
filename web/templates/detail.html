@@ -21,9 +21,8 @@
         <a class="btn primary" href="https://bioinf.cs.ucl.ac.uk/psipred/&uuid={{.PsipredUUID}}" target="_blank"
             rel="noopener">Acessar PSIPRED</a>
         {{else}}
-        <form method="post" action="/psipred/submit/{{.VariantCode}}">
-            <button class="btn primary" type="submit">Enviar PSIPRED</button>
-        </form>
+        <!-- Instead of direct submit, open a preview modal that shows the FASTA to be sent -->
+        <button class="btn primary" id="preview-send" data-variant="{{.VariantCode}}">Enviar PSIPRED</button>
         {{end}}
         <button class="btn secondary"
             onclick="(function(){navigator.clipboard.writeText('{{js .TranslateMergedRef}}')})()">Copiar
@@ -56,5 +55,23 @@
     <pre>{{.NucleotidesAlign}}</pre>
 
     <h3 style="margin-top:12px">TranslateMergedRef</h3>
-    <pre>{{.TranslateMergedRef}}</pre>
+    <pre id="translate-merged-ref">{{.TranslateMergedRef}}</pre>
+</div>
+
+<!-- Preview modal for FASTA before sending -->
+<div id="fasta-preview-modal" class="modal" aria-hidden="true">
+    <div class="modal-backdrop" data-dismiss="modal"></div>
+    <div class="modal-panel">
+        <header class="modal-header">
+            <h3 id="fasta-preview-title">Preview FASTA</h3>
+            <button class="btn secondary" id="fasta-preview-close">Fechar</button>
+        </header>
+        <div class="modal-body">
+            <pre id="fasta-preview-body">Carregando...</pre>
+        </div>
+        <footer style="padding:12px;display:flex;gap:8px;justify-content:flex-end">
+            <button class="btn secondary" id="fasta-send-cancel">Cancelar</button>
+            <button class="btn primary" id="fasta-send-confirm">Confirmar e Enviar</button>
+        </footer>
+    </div>
 </div>

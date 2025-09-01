@@ -62,27 +62,85 @@
     }
 
     function attachDetailHandlers() {
+        // legacy direct-submit forms (if any)
         document.querySelectorAll('form[action^="/psipred/submit/"]').forEach(f => {
             f.addEventListener('submit', async function (ev) {
                 ev.preventDefault()
+                // fallback: behave like preview confirm
                 const action = f.getAttribute('action')
-                const btn = f.querySelector('button')
-                const old = btn.textContent
-                btn.disabled = true; btn.textContent = 'Enviando...'
-                try {
-                    // server now returns { job_id: "..." }
-                    const data = await fetchJSON(action, { method: 'POST' })
-                    btn.textContent = 'Enviado'
-                    if (data && data.job_id) {
-                        // poll internal API for job state
-                        pollInternalJob(data.job_id)
-                    }
-                } catch (err) {
-                    btn.textContent = 'Erro'
-                    console.error(err)
-                } finally { setTimeout(() => { btn.disabled = false; btn.textContent = old }, 1500) }
+                const code = action.replace('/psipred/submit/', '')
+                await openFastaPreviewAndSubmit(code)
             })
         })
+        // preview-send button in detail template
+        const previewBtn = document.getElementById('preview-send')
+        if (previewBtn) {
+            previewBtn.addEventListener('click', async function (ev) {
+                ev.preventDefault()
+                const code = this.getAttribute('data-variant')
+                await openFastaPreviewAndSubmit(code)
+            })
+        }
+    }
+
+    // client-side cleaning function: keep only standard amino-acids
+    function clientCleanSequence(s) {
+        const allowed = new Set('ACDEFGHIKLMNPQRSTVWY')
+        let lines = s.split('\n')
+        let raw = ''
+        for (let line of lines) {
+            line = line.trim()
+            if (!line) continue
+            if (line.startsWith('>')) continue
+            raw += line
+        }
+        let out = ''
+        for (let i = 0; i < raw.length; i++) {
+            let ch = raw[i]
+            if (ch >= 'a' && ch <= 'z') ch = ch.toUpperCase()
+            if (allowed.has(ch)) out += ch
+        }
+        return out
+    }
+
+    async function openFastaPreviewAndSubmit(variantCode) {
+        // read the TranslateMergedRef from the DOM
+        const pre = document.getElementById('translate-merged-ref')
+        const text = pre ? pre.textContent : ''
+        const clean = clientCleanSequence(text)
+        // show only the sequence in the preview (no header), server will send only the sequence as well
+        const fasta = `${clean}\n`
+        const modal = document.getElementById('fasta-preview-modal')
+        const body = document.getElementById('fasta-preview-body')
+        if (modal) modal.setAttribute('aria-hidden', 'false')
+        if (body) body.textContent = fasta
+        // wire confirm/cancel handlers
+        const close = document.getElementById('fasta-preview-close')
+        const cancel = document.getElementById('fasta-send-cancel')
+        const confirm = document.getElementById('fasta-send-confirm')
+        const hide = () => { modal && modal.setAttribute('aria-hidden', 'true') }
+        const oneTime = async () => {
+            // perform POST to server submit endpoint
+            try {
+                const res = await fetch('/psipred/submit/' + variantCode, { method: 'POST' })
+                if (!res.ok) throw new Error(await res.text())
+                const data = await res.json()
+                hide()
+                if (data && data.job_id) pollInternalJob(data.job_id)
+            } catch (e) {
+                alert('Falha ao submeter: ' + e.message)
+            } finally {
+                // cleanup handlers
+                confirm.removeEventListener('click', oneTime)
+                close.removeEventListener('click', hide)
+                cancel.removeEventListener('click', hide)
+            }
+        }
+        if (confirm) {
+            confirm.addEventListener('click', oneTime)
+        }
+        if (close) close.addEventListener('click', hide)
+        if (cancel) cancel.addEventListener('click', hide)
     }
 
     async function pollJob(uuid) {
