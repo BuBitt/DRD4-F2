@@ -1,8 +1,8 @@
 package ncbi
 
-// Package ncbi provides a small helper for fetching GenBank translations
-// from NCBI's efetch service with a file-backed cache. The package exposes
-// functions for batched translations, cache control, and metadata retrieval.
+// Pacote ncbi fornece um pequeno helper para buscar traduções do GenBank
+// usando o serviço efetch da NCBI com um cache baseado em arquivo. O pacote
+// expõe funções para traduções em lote, controle de cache e recuperação de metadados.
 
 import (
 	"context"
@@ -20,7 +20,7 @@ import (
 	"time"
 )
 
-// httpClient performs requests; tests may replace it with a mock transport.
+// httpClient realiza requisições; testes podem substituí-lo por um transporte mock.
 var httpClient *http.Client
 
 func init() {
@@ -32,7 +32,7 @@ func init() {
 	}
 	httpClient = &http.Client{Transport: tr, Timeout: 30 * time.Second}
 
-	// start background cache flusher
+	// iniciar rotina em background para persistir o cache
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -42,7 +42,7 @@ func init() {
 	}()
 }
 
-// Cache structures
+// Estruturas do cache
 type cachedEntry struct {
 	Translation string `json:"translation"`
 	RetrievedAt int64  `json:"retrieved_at"`
@@ -57,7 +57,7 @@ var (
 	cacheFilePath string
 )
 
-// cache TTL in seconds (default 7 days)
+// TTL do cache em segundos (padrão 7 dias)
 func cacheTTL() int64 {
 	if s := os.Getenv("NCBI_CACHE_TTL_SECONDS"); s != "" {
 		if v, err := time.ParseDuration(s + "s"); err == nil {
@@ -79,14 +79,14 @@ func defaultCachePath() string {
 	return filepath.Join(os.TempDir(), "drd4_ncbi_cache.json")
 }
 
-// SetCacheFilePath sets the file path used for the cache (for testing or config).
+// SetCacheFilePath define o caminho do arquivo usado para o cache (para testes ou config).
 func SetCacheFilePath(p string) {
 	cacheFilePath = p
 	// reload on next access
 	cacheLoaded = false
 }
 
-// SetCacheTTLSeconds sets the cache TTL via environment-like string (for tests/config).
+// SetCacheTTLSeconds define o TTL do cache via string similar a variável de ambiente (para testes/config).
 func SetCacheTTLSeconds(ttl int64) {
 	// set via env is supported in cacheTTL(); as a simple override we mutate NCBI_CACHE_TTL_SECONDS env
 	os.Setenv("NCBI_CACHE_TTL_SECONDS", fmt.Sprintf("%d", ttl))
@@ -110,7 +110,7 @@ func loadCache() {
 }
 
 func saveCache() {
-	// snapshot under lock and write without holding lock
+	// criar snapshot sob lock e gravar sem segurar o lock
 	cacheMu.RLock()
 	snap := make(map[string]cachedEntry, len(cache))
 	for k, v := range cache {
@@ -126,8 +126,8 @@ func saveCache() {
 	_ = os.WriteFile(path, b, 0o644)
 }
 
-// FlushCache forces a synchronous write of the in-memory cache to disk.
-// Call this on program shutdown to avoid losing recent cache entries.
+// FlushCache força a escrita síncrona do cache em memória para disco.
+// Chame isto no encerramento do programa para evitar perda de entradas recentes.
 func FlushCache() {
 	saveCache()
 }
@@ -158,8 +158,8 @@ func setCached(acc, tr string, pbCount, aaCount int) {
 	// do not block; background goroutine flushes periodically
 }
 
-// FetchTranslations fetches translations for multiple accessions using a single efetch call
-// and returns a map accession->translation. It uses xml.Decoder so it's streaming and robust.
+// FetchTranslations busca traduções para múltiplos accessions usando uma única chamada efetch
+// e retorna um mapa accession->translation. Usa xml.Decoder para ser streaming e robusto.
 func FetchTranslations(ctx context.Context, accessions []string) (map[string]string, error) {
 	res := make(map[string]string)
 	if len(accessions) == 0 {
@@ -220,7 +220,7 @@ func FetchTranslations(ctx context.Context, accessions []string) (map[string]str
 					switch el := tk.(type) {
 					case xml.StartElement:
 						if el.Name.Local == "GBSeq_accession-version" || el.Name.Local == "GBSeq_locus" || el.Name.Local == "GBSeq_primary-accession" {
-							// read accession text
+							// ler texto do accession
 							var accText string
 							_ = dec.DecodeElement(&accText, &el)
 							currentAcc = strings.TrimSpace(accText)
@@ -238,7 +238,7 @@ func FetchTranslations(ctx context.Context, accessions []string) (map[string]str
 									res[currentAcc] = tr
 									setCached(currentAcc, tr, currentPBLen, len(tr))
 								} else {
-									// no accession element found for this translation; collect it
+									// nenhum elemento accession encontrado para esta tradução; coletar
 									collected = append(collected, tr)
 								}
 							}
@@ -255,8 +255,8 @@ func FetchTranslations(ctx context.Context, accessions []string) (map[string]str
 						}
 					}
 				}
-				// if no accession-based mappings found but we have collected translations
-				// and the request was for a single accession, assign the first collected translation
+				// se nenhum mapeamento baseado em accession encontrado mas coletamos traduções
+				// e a requisição foi para um único accession, atribuir a primeira tradução coletada
 				if len(res) == 0 && len(collected) > 0 && len(missing) == 1 {
 					res[missing[0]] = collected[0]
 					// no pb info available here
@@ -265,8 +265,8 @@ func FetchTranslations(ctx context.Context, accessions []string) (map[string]str
 				return res, nil
 			}
 			if resp.StatusCode == 429 {
-				lastErr = fmt.Errorf("ncbi efetch returned 429")
-				// try to respect Retry-After header
+				lastErr = fmt.Errorf("ncbi efetch retornou 429")
+				// tentar respeitar o header Retry-After
 				if ra := resp.Header.Get("Retry-After"); ra != "" {
 					if s, err := time.ParseDuration(ra + "s"); err == nil {
 						time.Sleep(s)
@@ -289,10 +289,9 @@ func FetchTranslations(ctx context.Context, accessions []string) (map[string]str
 	return res, nil
 }
 
-// FetchTranslationFromGenBank fetches the GenBank record (XML) for the given
-// nucleotide accession and extracts the first CDS translation found. Returns
-// empty string if not found.
-// FetchTranslationFromGenBank fetches a single accession translation using FetchTranslations under the hood.
+// FetchTranslationFromGenBank busca o registro GenBank (XML) para o accession nucleotídico fornecido
+// e extrai a primeira tradução CDS encontrada. Retorna string vazia se não encontrada.
+// Esta função usa FetchTranslations internamente para buscar um accession.
 func FetchTranslationFromGenBank(accession string) (string, error) {
 	if accession == "" {
 		return "", nil
@@ -313,8 +312,8 @@ func FetchTranslationFromGenBank(accession string) (string, error) {
 	return "", nil
 }
 
-// GetCachedMetadata returns translation, pbCount, aaCount and found flag for an accession from the cache.
-// It does not attempt network fetch; it only reads the in-memory/disk cache.
+// GetCachedMetadata retorna tradução, pbCount, aaCount e flag encontrado para um accession a partir do cache.
+// Não tenta buscar na rede; apenas lê o cache em memória/disco.
 func GetCachedMetadata(acc string) (string, int, int, bool) {
 	if acc == "" {
 		return "", 0, 0, false

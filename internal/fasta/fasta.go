@@ -1,7 +1,7 @@
 package fasta
 
-// Package fasta contains minimal helpers to parse FASTA formatted data used
-// by the project. It intentionally keeps parsing simple and conservative.
+// Pacote fasta contém helpers mínimos para analisar dados formatados em FASTA
+// usados pelo projeto. Intencionalmente mantém o parser simples e conservador.
 
 import (
 	"bufio"
@@ -9,14 +9,14 @@ import (
 	"strings"
 )
 
-// FastaRecord represents a single FASTA record (header and sequence).
+// FastaRecord representa um único registro FASTA (cabeçalho e sequência).
 type FastaRecord struct {
 	Header   string
 	Sequence string
 }
 
-// ParseFasta reads FASTA records from r and returns a slice of FastaRecord.
-// Lines beginning with '>' denote headers; sequence lines are concatenated.
+// ParseFasta lê registros FASTA de r e retorna uma slice de FastaRecord.
+// Linhas iniciadas com '>' denotam cabeçalhos; linhas de sequência são concatenadas.
 func ParseFasta(r io.Reader) []FastaRecord {
 	scanner := bufio.NewScanner(r)
 	var records []FastaRecord

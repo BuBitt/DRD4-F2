@@ -69,15 +69,28 @@ func (tw *terminalWriter) Write(p []byte) (int, error) { return tw.w.Write(p) }
 func (tw *terminalWriter) Fd() uintptr { return tw.fd }
 
 func main() {
-	// CLI flags
-	inputFlag := flag.String("in", "drd4-tdah.fasta", "input FASTA file path")
-	outputFlag := flag.String("out", "database.json", "output JSON file path")
-	configFlag := flag.String("config", "", "path to config.json (optional)")
-	externalFlag := flag.Bool("external", false, "enable external translator fallback (transeq/seqkit)")
-	mafftArgs := flag.String("mafft-args", "--auto", "additional arguments to pass to mafft (quoted)")
-	dryRun := flag.Bool("dry-run", false, "perform a dry run without writing outputs or calling external tools")
-	verbose := flag.Bool("verbose", false, "enable verbose (debug) logging")
-	versionFlag := flag.Bool("version", false, "print version and exit")
+	// Flags da CLI
+	inputFlag := flag.String("in", "drd4-tdah.fasta", "caminho do arquivo FASTA de entrada")
+	outputFlag := flag.String("out", "database.json", "caminho do arquivo JSON de saída")
+	configFlag := flag.String("config", "", "caminho para config.json (opcional)")
+	externalFlag := flag.Bool("external", false, "habilitar tradutor externo como fallback (transeq/seqkit)")
+	alignerFlag := flag.String("aligner", "mafft", "alinhador a usar: \"mafft\" ou \"clustalw\"")
+	mafftArgs := flag.String("mafft-args", "--auto", "argumentos adicionais para mafft (entre aspas)")
+	dryRun := flag.Bool("dry-run", false, "executar sem gravar saídas ou chamar ferramentas externas")
+	verbose := flag.Bool("verbose", false, "habilitar logs verbosos (debug)")
+	versionFlag := flag.Bool("version", false, "imprimir versão e sair")
+
+	// Mensagem de uso (ajuda) personalizada em português
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Uso: %s [opções]\n\n", os.Args[0])
+		fmt.Fprintln(os.Stderr, "Opções:")
+		flag.PrintDefaults()
+		fmt.Fprintln(os.Stderr, "\nExemplos:")
+		fmt.Fprintf(os.Stderr, "  %s -in entrada.fasta -out database.json\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -aligner clustalw -dry-run\n", os.Args[0])
+		fmt.Fprintln(os.Stderr, "\nNota: o alinhador pode ser 'mafft' (padrão) ou 'clustalw'. Se usar 'clustalw', o binário 'clustalw' deve estar no PATH.")
+	}
+
 	flag.Parse()
 
 	if *versionFlag {
@@ -97,6 +110,10 @@ func main() {
 	}
 	if *externalFlag {
 		cfg.UseExternalTranslator = true
+	}
+	// mescla a escolha do alinhador (flag) no config
+	if alignerFlag != nil && *alignerFlag != "" {
+		cfg.Aligner = *alignerFlag
 	}
 
 	// initialize file vars used by legacy logic

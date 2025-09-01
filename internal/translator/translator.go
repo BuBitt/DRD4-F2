@@ -1,9 +1,8 @@
 package translator
 
-// Package translator provides a thin wrapper around external translation
-// tools (e.g., seqkit) to translate single FASTA records to protein
-// sequences. The package keeps the translation logic outside the TUI and
-// main control flow.
+// Pacote translator fornece um wrapper fino em torno de ferramentas externas de tradução
+// (ex.: seqkit) para traduzir registros FASTA únicos em sequências proteicas.
+// O pacote mantém a lógica de tradução fora do TUI e do fluxo principal.
 
 import (
 	"context"
@@ -14,21 +13,21 @@ import (
 	"time"
 )
 
-// TranslatorRecord represents a single record that may require external
-// translation. Index should be the index in the original variants slice so
-// callers can map results back.
+// TranslatorRecord representa um único registro que pode requerer tradução externa.
+// Index deve ser o índice na slice original de variants para que os chamadores
+// possam mapear os resultados de volta.
 type TranslatorRecord struct {
 	Index    int
 	Header   string
 	Sequence string
 }
 
-// TranslateMissing uses the provided seqkitPath to translate each record's
-// nucleotide sequence into a protein sequence. It returns a map from record
-// Index to translated protein sequence. If seqkitPath is empty, it returns an
-// empty map and no error.
+// TranslateMissing utiliza o seqkitPath fornecido para traduzir a sequência
+// nucleotídica de cada registro em uma sequência proteica. Retorna um mapa
+// do índice do registro para a sequência proteica traduzida. Se seqkitPath
+// for vazio, retorna um mapa vazio e sem erro.
 //
-// This function does not log; callers should log counts or errors as desired.
+// Esta função não registra logs; os chamadores devem registrar contagens ou erros conforme desejado.
 func TranslateMissing(records []TranslatorRecord, seqkitPath string, perRecordTimeout time.Duration) (map[int]string, error) {
 	res := make(map[int]string)
 	if seqkitPath == "" {

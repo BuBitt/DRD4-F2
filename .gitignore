@@ -46,6 +46,6 @@ testdata/
 **/*.pb.go
 
 logs/log_file.log
-ncbi_cache.json
+ncbi_cache
 banco-japao.fasta
 logs/log_file.log

@@ -83,7 +83,7 @@ func (i listItem) Description() string {
 	// Metadata line shown below the title in the selector list
 	src := i.record.TranslationSource
 	if src == "" {
-		src = "unknown"
+		src = "desconhecido"
 	}
 	var srcRendered string
 	switch src {
@@ -94,7 +94,7 @@ func (i listItem) Description() string {
 	default:
 		srcRendered = sourceUnknownStyle.Render(src)
 	}
-	return fmt.Sprintf("Source: %s    PB: %d    AA: %d", srcRendered, i.record.PBCount, i.record.AACount)
+	return fmt.Sprintf("Fonte: %s    PB: %d    AA: %d", srcRendered, i.record.PBCount, i.record.AACount)
 }
 
 type mode int
@@ -108,13 +108,13 @@ const (
 func (m mode) String() string {
 	switch m {
 	case modeNucleotides:
-		return "🧬 Nucleotides"
+		return "🧬 Nucleotídeos"
 	case modeTranslated:
-		return "🧪 Translated"
+		return "🧪 Traduzido"
 	case modeAlignment:
-		return "📐 Alignment"
+		return "📐 Alinhamento"
 	default:
-		return "Unknown"
+		return "Desconhecido"
 	}
 }
 
@@ -147,7 +147,7 @@ func initialModel() model {
 
 	// Create list
 	l := list.New(items, list.NewDefaultDelegate(), 0, 0)
-	l.Title = "DRD4 Variants"
+	l.Title = "Variantes DRD4"
 	l.SetShowStatusBar(false)
 	l.SetShowPagination(true)
 	l.SetFilteringEnabled(true)
@@ -309,7 +309,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) View() string {
 	if m.width == 0 {
-		return "Loading..."
+		return "Carregando..."
 	}
 
 	// Help modal overlay
@@ -393,7 +393,7 @@ func (m model) renderRightPanel() string {
 		return containerStyle.
 			Width(rightWidth - 2).
 			Height(m.height - 4).
-			Render("No records available")
+			Render("Nenhum registro disponível")
 	}
 
 	selectedItem := m.list.SelectedItem()
@@ -401,7 +401,7 @@ func (m model) renderRightPanel() string {
 		return containerStyle.
 			Width(rightWidth - 2).
 			Height(m.height - 4).
-			Render("No item selected")
+			Render("Nenhum item selecionado")
 	}
 
 	record := selectedItem.(listItem).record
@@ -411,13 +411,13 @@ func (m model) renderRightPanel() string {
 		if record.TranslationSource != "" {
 			return record.TranslationSource
 		}
-		return "unknown"
+		return "desconhecido"
 	}()))
 
 	// Metadata line: source, PB and AA counts
 	src := record.TranslationSource
 	if src == "" {
-		src = "unknown"
+		src = "desconhecido"
 	}
 	// colorize the source token and make PB/AA use the same color/style
 	var srcStyle lipgloss.Style
@@ -436,7 +436,7 @@ func (m model) renderRightPanel() string {
 	pbColored := srcStyle.Render(fmt.Sprintf("PB: %d", record.PBCount))
 	aaColored := srcStyle.Render(fmt.Sprintf("AA: %d", record.AACount))
 
-	metaStr := label.Render("Source: ") + srcColored + label.Render("    ") + pbColored + label.Render("    ") + aaColored
+	metaStr := label.Render("Fonte: ") + srcColored + label.Render("    ") + pbColored + label.Render("    ") + aaColored
 
 	// Content based on current mode. If right panel is focused we render
 	// the prepared rightContentLines and honor rightScroll (visible window).
@@ -501,11 +501,11 @@ func (m model) renderRightPanel() string {
 	} else {
 		switch m.currentMode {
 		case modeNucleotides:
-			content = m.formatSequence(record.Nucleotides, "Nucleotides")
+			content = m.formatSequence(record.Nucleotides, "Nucleotídeos")
 		case modeTranslated:
-			content = m.formatSequence(record.Translated, "Translated Sequence")
+			content = m.formatSequence(record.Translated, "Sequência traduzida")
 		case modeAlignment:
-			content = m.formatSequence(record.NucleotidesAlign, "Nucleotides Alignment")
+			content = m.formatSequence(record.NucleotidesAlign, "Alinhamento de nucleotídeos")
 		}
 	}
 
@@ -528,7 +528,7 @@ func (m model) formatSequence(sequence, title string) string {
 	if sequence == "" {
 		return lipgloss.NewStyle().
 			Foreground(mutedColor).
-			Render(fmt.Sprintf("No %s available", strings.ToLower(title)))
+			Render(fmt.Sprintf("Nenhum %s disponível", strings.ToLower(title)))
 	}
 
 	// Remove line breaks and format for display
@@ -556,13 +556,13 @@ func (m model) formatSequence(sequence, title string) string {
 
 func (m model) renderStatusBar() string {
 	// Left side - navigation info
-	leftInfo := fmt.Sprintf("📊 %d/%d variants", m.selectedIndex+1, m.totalRecords)
+	leftInfo := fmt.Sprintf("📊 %d/%d variantes", m.selectedIndex+1, m.totalRecords)
 
 	// Center - current mode
-	centerInfo := fmt.Sprintf("Mode: %s", m.currentMode.String())
+	centerInfo := fmt.Sprintf("Modo: %s", m.currentMode.String())
 
 	// Right side - help hint
-	rightInfo := "Press 'h' for help • 'q' to quit"
+	rightInfo := "Pressione 'h' para ajuda • 'q' para sair"
 
 	// Calculate spacing
 	totalUsed := len(leftInfo) + len(centerInfo) + len(rightInfo)
@@ -591,24 +591,24 @@ func (m model) renderStatusBar() string {
 }
 
 func (m model) renderHelpModal() string {
-	helpContent := `🧬 DRD4 Variants Browser - Help
+	helpContent := `🧬 Navegador de Variantes DRD4 - Ajuda
 
-Navigation:
-  ↑/↓, j/k     Navigate list
-  /            Filter variants
-  Enter        Select variant
+Navegação:
+  ↑/↓, j/k     Navegar pela lista
+  /            Filtrar variantes
+  Enter        Selecionar variante
 
-View Modes:
-  1            Show nucleotides
-  2            Show translated sequence  
-  3            Show nucleotides alignment
+Modos de Visualização:
+  1            Exibir nucleotídeos
+  2            Exibir sequência traduzida
+  3            Exibir alinhamento de nucleotídeos
 
-General:
-  h            Toggle this help
-  q, Ctrl+C    Quit application
+Geral:
+  h            Alternar esta ajuda
+  q, Ctrl+C    Sair do aplicativo
 
-Current Mode: ` + m.currentMode.String() + `
-Total Variants: ` + fmt.Sprintf("%d", m.totalRecords) + `
+Modo Atual: ` + m.currentMode.String() + `
+Total de Variantes: ` + fmt.Sprintf("%d", m.totalRecords) + `
 `
 
 	// Create modal box
@@ -636,7 +636,7 @@ Total Variants: ` + fmt.Sprintf("%d", m.totalRecords) + `
 func main() {
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
-		fmt.Printf("Error: %v", err)
+		fmt.Printf("Erro: %v", err)
 		os.Exit(1)
 	}
 }
