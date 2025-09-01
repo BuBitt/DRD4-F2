@@ -159,7 +159,16 @@
             const el = document.getElementById('psipred-status')
             el && (el.textContent = 'Acompanhando job interno...')
             const res = await fetch('/api/psipred/job/' + id)
-            if (!res.ok) { el && (el.textContent = 'Erro ao consultar job'); return }
+            if (!res.ok) {
+                // If job not yet persisted the server may return 404 briefly; retry a few times.
+                if (res.status === 404) {
+                    el && (el.textContent = 'Aguardando criação do job...')
+                    setTimeout(() => pollInternalJob(id), 2000)
+                    return
+                }
+                el && (el.textContent = 'Erro ao consultar job')
+                return
+            }
             const data = await res.json()
             el && (el.textContent = JSON.stringify(data))
             // if not final, poll again in 8s
