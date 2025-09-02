@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
+	crand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -15,12 +15,15 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"database/sql"
 	"drd4/internal/psipred"
+
+	mrand "math/rand"
 
 	_ "modernc.org/sqlite"
 )
@@ -132,6 +135,7 @@ func initJobsDB(path string) error {
 			state TEXT,
 			message TEXT,
 			email TEXT,
+			remote_state TEXT,
 			created_at TEXT,
 			updated_at TEXT
 		)`)
@@ -162,6 +166,33 @@ func initJobsDB(path string) error {
 				log.Printf("migrated jobs table: added email column")
 			}
 		}
+		// ensure remote_state column exists
+		// (older DBs may not have it)
+		foundRemote := false
+		cols, err := db.Query("PRAGMA table_info(jobs);")
+		if err == nil {
+			defer cols.Close()
+			for cols.Next() {
+				var cid int
+				var name string
+				var ctype string
+				var notnull int
+				var dflt interface{}
+				var pk int
+				_ = cols.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk)
+				if name == "remote_state" {
+					foundRemote = true
+					break
+				}
+			}
+		}
+		if !foundRemote {
+			if _, err := db.Exec("ALTER TABLE jobs ADD COLUMN remote_state TEXT"); err != nil {
+				log.Printf("failed to add remote_state column to jobs table: %v", err)
+			} else {
+				log.Printf("migrated jobs table: added remote_state column")
+			}
+		}
 	}
 	jobsDB = db
 	return nil
@@ -181,7 +212,7 @@ func loadJobs(path string) ([]PsipredJob, error) {
 		if jobsDB == nil {
 			return out, fmt.Errorf("sqlite db not initialized")
 		}
-		rows, err := jobsDB.Query("SELECT id, variant_code, remote_uuid, state, message, email, created_at, updated_at FROM jobs ORDER BY created_at DESC")
+		rows, err := jobsDB.Query("SELECT id, variant_code, remote_uuid, state, message, email, remote_state, created_at, updated_at FROM jobs ORDER BY created_at DESC")
 		if err != nil {
 			return out, err
 		}
@@ -190,11 +221,15 @@ func loadJobs(path string) ([]PsipredJob, error) {
 			var j PsipredJob
 			var created, updated string
 			var email sql.NullString
-			if err := rows.Scan(&j.ID, &j.VariantCode, &j.RemoteUUID, &j.State, &j.Message, &email, &created, &updated); err != nil {
+			var remoteState sql.NullString
+			if err := rows.Scan(&j.ID, &j.VariantCode, &j.RemoteUUID, &j.State, &j.Message, &email, &remoteState, &created, &updated); err != nil {
 				return out, err
 			}
 			if email.Valid {
 				j.Email = email.String
+			}
+			if remoteState.Valid {
+				j.RemoteState = remoteState.String
 			}
 			j.CreatedAt, _ = time.Parse(time.RFC3339, created)
 			j.UpdatedAt, _ = time.Parse(time.RFC3339, updated)
@@ -236,14 +271,14 @@ func saveJobs(path string, jobs []PsipredJob) error {
 			tx.Rollback()
 			return err
 		}
-		stmt, err := tx.Prepare("INSERT INTO jobs(id, variant_code, remote_uuid, state, message, email, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)")
+		stmt, err := tx.Prepare("INSERT INTO jobs(id, variant_code, remote_uuid, state, message, email, remote_state, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?)")
 		if err != nil {
 			tx.Rollback()
 			return err
 		}
 		defer stmt.Close()
 		for _, j := range jobs {
-			if _, err := stmt.Exec(j.ID, j.VariantCode, j.RemoteUUID, j.State, j.Message, j.Email, j.CreatedAt.Format(time.RFC3339), j.UpdatedAt.Format(time.RFC3339)); err != nil {
+			if _, err := stmt.Exec(j.ID, j.VariantCode, j.RemoteUUID, j.State, j.Message, j.Email, j.RemoteState, j.CreatedAt.Format(time.RFC3339), j.UpdatedAt.Format(time.RFC3339)); err != nil {
 				tx.Rollback()
 				return err
 			}
@@ -278,6 +313,8 @@ func persistJobUpdate(path string, update func([]PsipredJob) ([]PsipredJob, erro
 	for _, nj := range jobs {
 		if oj, ok := oldMap[nj.ID]; ok {
 			if oj.State != nj.State || oj.Message != nj.Message {
+				// debug log for visibility during troubleshooting
+				log.Printf("[PSIPRED-AUDIT] job %s: %s -> %s ; msg: %q -> %q", nj.ID, oj.State, nj.State, oj.Message, nj.Message)
 				// log change to the audit file (JSON line)
 				entry := map[string]interface{}{
 					"timestamp":    time.Now().Format(time.RFC3339),
@@ -293,6 +330,7 @@ func persistJobUpdate(path string, update func([]PsipredJob) ([]PsipredJob, erro
 			}
 		} else {
 			// new job created — record creation event
+			log.Printf("[PSIPRED-AUDIT] job %s created state=%s", nj.ID, nj.State)
 			entry := map[string]interface{}{
 				"timestamp":    time.Now().Format(time.RFC3339),
 				"job_id":       nj.ID,
@@ -335,7 +373,7 @@ func loadTemplates(dir string) error {
 // generateRandomEmail returns a pseudo-random email for job submissions
 func generateRandomEmail() string {
 	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
+	if _, err := crand.Read(b); err != nil {
 		return fmt.Sprintf("user+%d@example.com", time.Now().UnixNano())
 	}
 	return fmt.Sprintf("user+%s@example.com", hex.EncodeToString(b))
@@ -1213,16 +1251,28 @@ func startJobPoller(remoteUUID, jobID string) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				reqURL := strings.TrimRight(psipredBaseURL, "/") + "/submission/" + remoteUUID
+				// request JSON representation (some PSIPRED endpoints default to HTML)
+				reqURL := strings.TrimRight(psipredBaseURL, "/") + "/submission/" + remoteUUID + "?format=json"
 				resp, err := cli.Get(reqURL)
 				if err != nil {
 					continue
 				}
 				if resp.StatusCode == 429 || resp.StatusCode == 503 {
-					auditAppend(map[string]interface{}{"timestamp": time.Now().Format(time.RFC3339), "event": "poll_rate_limited", "remote_uuid": remoteUUID, "status": resp.StatusCode})
+					// respect Retry-After header if present, otherwise backoff 10s with jitter
+					ra := resp.Header.Get("Retry-After")
+					back := parseRetryAfter(ra)
+					if back <= 0 {
+						back = 10 * time.Second
+					}
+					back = jitterDuration(back)
+					auditAppend(map[string]interface{}{"timestamp": time.Now().Format(time.RFC3339), "event": "poll_rate_limited", "remote_uuid": remoteUUID, "status": resp.StatusCode, "retry_after": ra, "backoff": back.String()})
 					resp.Body.Close()
-					time.Sleep(10 * time.Second)
-					continue
+					select {
+					case <-time.After(back):
+						continue
+					case <-ctx.Done():
+						return
+					}
 				}
 				body, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
@@ -1230,10 +1280,41 @@ func startJobPoller(remoteUUID, jobID string) {
 				if err := json.Unmarshal(body, &m); err != nil {
 					continue
 				}
-				state := ""
-				if s, ok := m["state"].(string); ok {
-					state = s
+				// tolerant extraction of remote state: check several possible keys/capitalizations
+				var state string
+				tryKeys := []string{"state", "State", "status", "Status"}
+				for _, k := range tryKeys {
+					if v, ok := m[k]; ok {
+						if s, ok := v.(string); ok && s != "" {
+							state = s
+							break
+						}
+					}
 				}
+				// if top-level state not found, check submissions[] for nested state/last_message
+				if state == "" {
+					if subs, ok := m["submissions"].([]interface{}); ok && len(subs) > 0 {
+						if first, ok := subs[0].(map[string]interface{}); ok {
+							for _, k := range tryKeys {
+								if v, ok := first[k]; ok {
+									if s, ok := v.(string); ok && s != "" {
+										state = s
+										break
+									}
+								}
+							}
+							if state == "" {
+								if v, ok := first["last_message"].(string); ok && v != "" {
+									state = v
+								}
+							}
+						}
+					}
+				}
+
+				// normalize whitespace
+				state = strings.TrimSpace(state)
+
 				// persist remote state and update local state accordingly
 				_ = persistJobUpdate(jobsPath, func(js []PsipredJob) ([]PsipredJob, error) {
 					for i := range js {
@@ -1313,6 +1394,23 @@ func pollersAdminHandler() http.HandlerFunc {
 				variant = p.JobID
 			}
 			m["variant_id"] = variant
+			m["job_id"] = p.JobID
+			// try to read persisted job state to show local/remote states
+			localState := "-"
+			remoteState := "-"
+			if jobs, err := loadJobs(jobsPath); err == nil {
+				for _, jj := range jobs {
+					if jj.ID == p.JobID {
+						localState = strings.ToLower(jj.State)
+						if jj.RemoteState != "" {
+							remoteState = strings.ToLower(jj.RemoteState)
+						}
+						break
+					}
+				}
+			}
+			m["local_state"] = localState
+			m["remote_state"] = remoteState
 			m["status"] = p.Status
 			if !p.StartedAt.IsZero() {
 				m["started_at"] = p.StartedAt.Format("2006-01-02 15:04:05")
@@ -1359,6 +1457,23 @@ func pollersFragmentHandler() http.HandlerFunc {
 				variant = p.JobID
 			}
 			m["variant_id"] = variant
+			m["job_id"] = p.JobID
+			// read persisted state for display
+			localState := "-"
+			remoteState := "-"
+			if jobs, err := loadJobs(jobsPath); err == nil {
+				for _, jj := range jobs {
+					if jj.ID == p.JobID {
+						localState = jj.State
+						if jj.RemoteState != "" {
+							remoteState = jj.RemoteState
+						}
+						break
+					}
+				}
+			}
+			m["local_state"] = localState
+			m["remote_state"] = remoteState
 			m["status"] = p.Status
 			if !p.StartedAt.IsZero() {
 				m["started_at"] = p.StartedAt.Format("02 Jan 2006 15:04")
@@ -1481,6 +1596,38 @@ func humanAgo(t time.Time) string {
 	}
 	days := int(d.Hours() / 24)
 	return fmt.Sprintf("há %dd", days)
+}
+
+// parseRetryAfter attempts to parse Retry-After header and returns a duration.
+// Supports both HTTP-date and seconds value. Falls back to 0 on parse failure.
+func parseRetryAfter(h string) time.Duration {
+	if h == "" {
+		return 0
+	}
+	// try integer seconds
+	if secs, err := strconv.Atoi(strings.TrimSpace(h)); err == nil {
+		return time.Duration(secs) * time.Second
+	}
+	// try HTTP date
+	if t, err := http.ParseTime(h); err == nil {
+		d := time.Until(t)
+		if d < 0 {
+			return 0
+		}
+		return d
+	}
+	return 0
+}
+
+// jitterDuration returns a duration with +/- jitter up to 25%.
+func jitterDuration(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	// jitter up to ±25%
+	maxJ := int64(d / 4)
+	delta := time.Duration(mrand.Int63n(maxJ*2+1) - maxJ)
+	return d + delta
 }
 
 // api to list active pollers and semaphore status
@@ -1698,6 +1845,9 @@ func apiPsipredFailuresHandler() http.HandlerFunc {
 }
 
 func main() {
+	// seed math/rand for jitter
+	mrand.Seed(time.Now().UnixNano())
+
 	addr := flag.String("addr", ":8080", "endereço HTTP para servir")
 	dbPath := flag.String("db", "database.json", "caminho para database.json")
 	templatesDir := flag.String("templates", "web/templates", "diretório de templates HTML")

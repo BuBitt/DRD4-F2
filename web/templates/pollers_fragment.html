@@ -2,6 +2,9 @@
 {{range .}}
 <tr>
     <td>{{.M.variant_id}}</td>
+    <td>{{.M.job_id}}</td>
+    <td><span class="badge" state="{{.M.local_state}}">{{.M.local_state}}</span></td>
+    <td><span class="badge" state="{{.M.remote_state}}">{{.M.remote_state}}</span></td>
     <td>{{if .UUID}}<a href="/psipred/job/{{.UUID}}">{{.UUID}}</a>{{else}}—{{end}}</td>
     <td>{{.M.started_at}} <div class="meta">{{.M.started_rel}}</div>
     </td>
@@ -15,7 +18,7 @@
 </tr>
 {{else}}
 <tr>
-    <td colspan="6">Nenhum poller ativo</td>
+    <td colspan="9">Nenhum poller ativo</td>
 </tr>
 {{end}}
 {{end}}
