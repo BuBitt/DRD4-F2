@@ -45,7 +45,10 @@ testdata/
 # ignore generated protobufs or similar (if any)
 **/*.pb.go
 
+psipred_audit.log
 logs/log_file.log
 ncbi_cache
 banco-japao.fasta
 logs/log_file.log
+
+access.log

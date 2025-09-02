@@ -1388,6 +1388,7 @@ func pollersFragmentHandler() http.HandlerFunc {
 
 		// Defensive cleanup: remove pollers whose local job is already final (complete/error).
 		// This handles edge-cases where the poller goroutine didn't remove itself.
+		finalFiltered := entries
 		if len(entries) > 0 {
 			if jobs, err := loadJobs(jobsPath); err == nil {
 				// build a lookup of job id -> state
@@ -1395,6 +1396,8 @@ func pollersFragmentHandler() http.HandlerFunc {
 				for _, j := range jobs {
 					stateByJob[j.ID] = j.State
 				}
+				// filter out entries whose job is final and remove them from the runtime map
+				keep := make([]pollerEntry, 0, len(entries))
 				for _, ent := range entries {
 					jid := ent.JobID
 					uuid := ent.UUID
@@ -1406,13 +1409,16 @@ func pollersFragmentHandler() http.HandlerFunc {
 							jobsPollersMu.Unlock()
 							// audit cleanup
 							go auditAppend(map[string]interface{}{"timestamp": time.Now().Format(time.RFC3339), "event": "poller_autoremoved", "remote_uuid": uuid, "job_id": jid, "state": st})
+							continue
 						}
 					}
+					keep = append(keep, ent)
 				}
+				finalFiltered = keep
 			}
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := templates.ExecuteTemplate(w, "pollers_fragment.html", entries); err != nil {
+		if err := templates.ExecuteTemplate(w, "pollers_fragment.html", finalFiltered); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
