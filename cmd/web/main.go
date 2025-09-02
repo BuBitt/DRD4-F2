@@ -114,6 +114,7 @@ type ss2Progress struct {
 
 var ss2Prog ss2Progress
 var ss2ProgMu sync.Mutex
+var ss2Concurrency int = 4
 
 // audit log path for state change events
 var auditLogPath string = "psipred_audit.log"
@@ -262,12 +263,19 @@ func saveJobs(path string, jobs []PsipredJob) error {
 		if err != nil {
 			return err
 		}
-		// clear and insert
-		if _, err := tx.Exec("DELETE FROM jobs"); err != nil {
-			tx.Rollback()
-			return err
-		}
-		stmt, err := tx.Prepare("INSERT INTO jobs(id, variant_code, remote_uuid, state, message, email, remote_state, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?)")
+		// Use UPSERT to insert or update rows by primary key to avoid a full table delete/insert.
+		stmt, err := tx.Prepare(`INSERT INTO jobs(id, variant_code, remote_uuid, state, message, email, remote_state, created_at, updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?)
+			ON CONFLICT(id) DO UPDATE SET
+				variant_code=excluded.variant_code,
+				remote_uuid=excluded.remote_uuid,
+				state=excluded.state,
+				message=excluded.message,
+				email=excluded.email,
+				remote_state=excluded.remote_state,
+				created_at=excluded.created_at,
+				updated_at=excluded.updated_at
+		`)
 		if err != nil {
 			tx.Rollback()
 			return err
@@ -1838,26 +1846,39 @@ func runSS2DownloadAll() {
 	ss2Prog.Total = len(targets)
 	ss2ProgMu.Unlock()
 
+	// bounded parallelism using semaphore
+	sem := make(chan struct{}, ss2Concurrency)
+	var wg sync.WaitGroup
 	for _, j := range targets {
-		ss2ProgMu.Lock()
-		ss2Prog.Current = j.ID
-		ss2ProgMu.Unlock()
+		wg.Add(1)
+		// capture j
+		job := j
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			// set current for UI (best-effort)
+			ss2ProgMu.Lock()
+			ss2Prog.Current = job.ID
+			ss2ProgMu.Unlock()
 
-		if err := fetchAndSaveSS2(j.RemoteUUID, j.ID); err != nil {
+			err := fetchAndSaveSS2(job.RemoteUUID, job.ID)
+
 			ss2ProgMu.Lock()
-			ss2Prog.Errors = append(ss2Prog.Errors, map[string]string{"job_id": j.ID, "variant": j.VariantCode, "error": err.Error()})
-			ss2Prog.PerJob[j.ID] = err.Error()
+			if err != nil {
+				ss2Prog.Errors = append(ss2Prog.Errors, map[string]string{"job_id": job.ID, "variant": job.VariantCode, "error": err.Error()})
+				ss2Prog.PerJob[job.ID] = err.Error()
+			} else {
+				ss2Prog.PerJob[job.ID] = "ok"
+			}
 			ss2Prog.Done++
 			ss2ProgMu.Unlock()
-		} else {
-			ss2ProgMu.Lock()
-			ss2Prog.PerJob[j.ID] = "ok"
-			ss2Prog.Done++
-			ss2ProgMu.Unlock()
-		}
-		// small pause to be polite to remote server
-		time.Sleep(300 * time.Millisecond)
+
+			// polite pause per-worker
+			time.Sleep(300 * time.Millisecond)
+			<-sem
+		}()
 	}
+	wg.Wait()
 
 	ss2ProgMu.Lock()
 	ss2Prog.Running = false
@@ -2128,6 +2149,7 @@ func main() {
 	pollTimeoutMin := flag.Int("psipred-poll-timeout-min", 60, "timeout de polling (minutos) para aguardar job")
 	pollersMax := flag.Int("psipred-pollers-max", 5, "maximo de pollers concorrentes (0 = ilimitado)")
 	webFlag := flag.Bool("web", false, "run with sensible web defaults (sqlite store, poll=10s, timeout=30m, access.log)")
+	ss2Conc := flag.Int("ss2-concurrency", 4, "max concurrent .ss2 downloads when running bulk download")
 	flag.Parse()
 
 	// If --web is provided, override relevant flags to production defaults
@@ -2138,6 +2160,11 @@ func main() {
 		*pollTimeoutMin = 30
 		if *logFile == "" {
 			*logFile = "access.log"
+		}
+
+		// apply CLI-configured ss2 concurrency
+		if ss2Conc != nil && *ss2Conc > 0 {
+			ss2Concurrency = *ss2Conc
 		}
 		// note: addr and templates keep their values unless explicitly changed
 	}
