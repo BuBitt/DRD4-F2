@@ -33,6 +33,7 @@ pkg/
 
 # NCBI cache
 *.json
+*.log
 drd4_ncbi_cache.json
 /.cache/
 
