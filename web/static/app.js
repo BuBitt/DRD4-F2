@@ -49,6 +49,80 @@
             })
         })
 
+        // SS2 bulk-download handlers
+        const downloadAllBtn = document.getElementById('psipred-download-ss2-all')
+        if (downloadAllBtn) {
+            downloadAllBtn.addEventListener('click', async function (ev) {
+                ev.preventDefault()
+                if (!confirm('Iniciar download de todos os arquivos .ss2 para variantes com resultados completos?')) return
+                // open modal
+                const modal = document.getElementById('psipred-ss2-modal')
+                const bar = document.getElementById('psipred-ss2-bar')
+                const summary = document.getElementById('psipred-ss2-summary')
+                const list = document.getElementById('psipred-ss2-list')
+                if (!modal || !bar || !summary || !list) return
+                modal.setAttribute('aria-hidden', 'false')
+                summary.textContent = 'Iniciando...'
+                list.innerHTML = ''
+                bar.style.width = '0%'
+
+                // start on server
+                try {
+                    const res = await fetch('/api/psipred/download-ss2/all', { method: 'POST' })
+                    if (!res.ok) {
+                        const txt = await res.text()
+                        alert('Falha ao iniciar: ' + txt)
+                        modal.setAttribute('aria-hidden', 'true')
+                        return
+                    }
+                } catch (e) {
+                    alert('Falha ao contactar servidor: ' + e.message)
+                    modal.setAttribute('aria-hidden', 'true')
+                    return
+                }
+
+                // poll status every 2s
+                let stopped = false
+                const closeBtn = document.getElementById('psipred-ss2-close')
+                if (closeBtn) closeBtn.addEventListener('click', function () { modal.setAttribute('aria-hidden', 'true'); stopped = true })
+
+                async function pollStatus() {
+                    if (stopped) return
+                    try {
+                        const r = await fetch('/api/psipred/download-ss2/status')
+                        if (!r.ok) { summary.textContent = 'Erro ao consultar status'; return }
+                        const s = await r.json()
+                        const total = s.total || 0
+                        const done = s.done || 0
+                        const running = s.running === true
+                        const current = s.current || ''
+                        const per = s.per_job || {}
+                        const pct = total === 0 ? 100 : Math.round((done / total) * 100)
+                        bar.style.width = pct + '%'
+                        summary.textContent = `Progresso: ${done}/${total} (${pct}%) ${running ? '— em execução: ' + current : ''}`
+                        // populate list
+                        list.innerHTML = ''
+                        Object.keys(per).forEach(k => {
+                            const li = document.createElement('li')
+                            li.textContent = `${k} — ${per[k]}`
+                            list.appendChild(li)
+                        })
+                        if (running) {
+                            setTimeout(pollStatus, 2000)
+                        } else {
+                            // finished
+                            setTimeout(() => { modal.setAttribute('aria-hidden', 'true') }, 800)
+                            // refresh jobs list after short delay
+                            setTimeout(refreshJobsList, 1000)
+                        }
+                    } catch (e) {
+                        summary.textContent = 'Erro: ' + e.message
+                    }
+                }
+                setTimeout(pollStatus, 500)
+            })
+        }
+
         // submit-all button (PSIPRED Jobs page)
         const submitAll = document.getElementById('psipred-submit-all')
         if (submitAll) {
@@ -78,6 +152,32 @@
             })
         }
     }
+
+    // Wire filter form clear button and pre-fill inputs from URL
+    function wireFilterForm() {
+        const form = document.getElementById('psipred-jobs-filter')
+        if (!form) return
+        const q = new URLSearchParams(window.location.search)
+        const qv = q.get('q') || ''
+        const sv = q.get('state') || ''
+        const inQ = document.getElementById('psipred-filter-q')
+        const inS = document.getElementById('psipred-filter-state')
+        if (inQ) inQ.value = qv
+        if (inS) inS.value = sv
+
+        const clear = document.getElementById('psipred-clear-filter')
+        if (clear) {
+            clear.addEventListener('click', function (ev) {
+                ev.preventDefault()
+                if (inQ) inQ.value = ''
+                if (inS) inS.value = ''
+                // submit the form to reload with no filters
+                form.submit()
+            })
+        }
+    }
+
+    // (Removed filter interception) Let the form submit natively so server-side filtering is used.
 
     async function loadVariantDetail(path) {
         try {
@@ -463,6 +563,7 @@
 
     // initial wire
     attachListHandlers()
+    wireFilterForm()
     attachDetailHandlers()
     // load variant if url points to one
     loadCurrentFromLocation()

@@ -68,8 +68,10 @@ type PsipredJob struct {
 
 // View model for the PSIPRED jobs page
 type PsipredJobsPage struct {
-	Jobs     []PsipredJob
-	Failures []PsipredJob
+	Jobs        []PsipredJob
+	Failures    []PsipredJob
+	Query       string
+	FilterState string
 }
 
 var jobsPath string
@@ -99,6 +101,19 @@ var jobsPollersMu sync.Mutex
 // semaphore to limit concurrent pollers
 var pollerSem chan struct{}
 var pollerMax int
+
+// SS2 bulk-download progress tracking
+type ss2Progress struct {
+	Running bool                `json:"running"`
+	Total   int                 `json:"total"`
+	Done    int                 `json:"done"`
+	Current string              `json:"current,omitempty"`
+	Errors  []map[string]string `json:"errors,omitempty"`
+	PerJob  map[string]string   `json:"per_job,omitempty"`
+}
+
+var ss2Prog ss2Progress
+var ss2ProgMu sync.Mutex
 
 // audit log path for state change events
 var auditLogPath string = "psipred_audit.log"
@@ -327,6 +342,16 @@ func persistJobUpdate(path string, update func([]PsipredJob) ([]PsipredJob, erro
 				}
 				// write asynchronously but protected by a mutex for file safety
 				go auditAppend(entry)
+				// if job transitioned to complete, attempt to fetch .ss2 from remote
+				if strings.EqualFold(nj.State, "complete") && nj.RemoteUUID != "" {
+					// spawn background fetch (do not block persistence)
+					j := nj
+					go func(job PsipredJob) {
+						if err := fetchAndSaveSS2(job.RemoteUUID, job.ID); err != nil {
+							log.Printf("[PSIPRED-SS2] failed to fetch .ss2 for job %s: %v", job.ID, err)
+						}
+					}(j)
+				}
 			}
 		} else {
 			// new job created — record creation event
@@ -344,8 +369,115 @@ func persistJobUpdate(path string, update func([]PsipredJob) ([]PsipredJob, erro
 	return saveJobs(path, jobs)
 }
 
+// fetchAndSaveSS2 downloads the .ss2 file(s) for a given remote submission and saves
+// them under secondary_struct/<variant>.ss2 (falls back to job ID if variant unknown).
+func fetchAndSaveSS2(remoteUUID, jobID string) error {
+	if remoteUUID == "" {
+		return fmt.Errorf("empty remote uuid")
+	}
+	// request JSON listing
+	cli := &http.Client{Timeout: 20 * time.Second}
+	reqURL := strings.TrimRight(psipredBaseURL, "/") + "/submission/" + remoteUUID + "?format=json"
+	resp, err := cli.Get(reqURL)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("failed to list submission: %s", resp.Status)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var m map[string]interface{}
+	if err := json.Unmarshal(body, &m); err != nil {
+		return err
+	}
+	// find results paths
+	var paths []string
+	if subs, ok := m["submissions"].([]interface{}); ok {
+		for _, si := range subs {
+			if s, ok := si.(map[string]interface{}); ok {
+				if res, ok := s["results"].([]interface{}); ok {
+					for _, ri := range res {
+						if r, ok := ri.(map[string]interface{}); ok {
+							if dp, ok := r["data_path"].(string); ok && strings.Contains(dp, ".ss2") {
+								paths = append(paths, dp)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if len(paths) == 0 {
+		return fmt.Errorf("no .ss2 paths found for %s", remoteUUID)
+	}
+	// determine filename base: must be variant code
+	variant := resolveVariantFromJob(jobID)
+	if variant == "" {
+		// if we can't resolve a variant code, skip saving (user requested filenames by variant)
+		return fmt.Errorf("cannot determine variant code for job %s", jobID)
+	}
+	// sanitize variant to a safe filename (allow letters, numbers, dot, dash, underscore)
+	safe := make([]rune, 0, len(variant))
+	for _, r := range variant {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '-' || r == '_' {
+			safe = append(safe, r)
+		} else {
+			safe = append(safe, '_')
+		}
+	}
+	variant = string(safe)
+	if err := os.MkdirAll("secondary_struct", 0755); err != nil {
+		return err
+	}
+	for i, p := range paths {
+		fileURL := strings.TrimRight(psipredBaseURL, "/") + p
+		r2, err := cli.Get(fileURL)
+		if err != nil {
+			return err
+		}
+		data, _ := io.ReadAll(r2.Body)
+		r2.Body.Close()
+		// choose filename; if multiple, append index
+		fname := variant + ".ss2"
+		if i > 0 {
+			fname = fmt.Sprintf("%s-%d.ss2", variant, i)
+		}
+		dst := filepath.Join("secondary_struct", fname)
+		if err := os.WriteFile(dst, data, 0644); err != nil {
+			return err
+		}
+		auditAppend(map[string]interface{}{"timestamp": time.Now().Format(time.RFC3339), "event": "ss2_saved", "job_id": jobID, "remote_uuid": remoteUUID, "path": dst})
+	}
+	return nil
+}
+
 func loadTemplates(dir string) error {
-	t := template.New("")
+	// helper funcs to safely extract Query/FilterState from different root types
+	funcMap := template.FuncMap{
+		"getQuery": func(v interface{}) string {
+			switch v := v.(type) {
+			case PsipredJobsPage:
+				return v.Query
+			case *PsipredJobsPage:
+				return v.Query
+			default:
+				return ""
+			}
+		},
+		"getFilter": func(v interface{}) string {
+			switch v := v.(type) {
+			case PsipredJobsPage:
+				return v.FilterState
+			case *PsipredJobsPage:
+				return v.FilterState
+			default:
+				return ""
+			}
+		},
+	}
+	t := template.New("").Funcs(funcMap)
+	files := []string{}
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -354,19 +486,21 @@ func loadTemplates(dir string) error {
 			return nil
 		}
 		if strings.HasSuffix(path, ".html") {
-			rel, _ := filepath.Rel(dir, path)
-			_, err := t.ParseFiles(path)
-			if err != nil {
-				return err
-			}
-			_ = rel
+			files = append(files, path)
 		}
 		return nil
 	})
 	if err != nil {
 		return err
 	}
+	if len(files) == 0 {
+		return fmt.Errorf("no templates found in %s", dir)
+	}
+	if _, err := t.ParseFiles(files...); err != nil {
+		return err
+	}
 	templates = t
+	log.Printf("loaded templates: %s", templates.DefinedTemplates())
 	return nil
 }
 
@@ -1681,6 +1815,98 @@ func apiPollersHandler() http.HandlerFunc {
 	}
 }
 
+// runSS2DownloadAll performs a background sequential download of .ss2 for jobs
+// that have remote_state == Complete and a remote UUID. It updates ss2Prog.
+func runSS2DownloadAll() {
+	ss2ProgMu.Lock()
+	if ss2Prog.Running {
+		ss2ProgMu.Unlock()
+		return
+	}
+	// initialize
+	ss2Prog = ss2Progress{Running: true, Total: 0, Done: 0, Errors: []map[string]string{}, PerJob: map[string]string{}}
+	ss2ProgMu.Unlock()
+
+	// collect jobs to process
+	jobs, err := loadJobs(jobsPath)
+	if err != nil {
+		ss2ProgMu.Lock()
+		ss2Prog.Running = false
+		ss2Prog.Errors = append(ss2Prog.Errors, map[string]string{"error": "failed to load jobs", "detail": err.Error()})
+		ss2ProgMu.Unlock()
+		return
+	}
+	targets := []PsipredJob{}
+	for _, j := range jobs {
+		// include jobs that have a remote UUID and are complete either remotely or locally
+		if j.RemoteUUID != "" && (strings.EqualFold(j.RemoteState, "Complete") || strings.EqualFold(j.State, "complete")) {
+			targets = append(targets, j)
+		}
+	}
+
+	ss2ProgMu.Lock()
+	ss2Prog.Total = len(targets)
+	ss2ProgMu.Unlock()
+
+	for _, j := range targets {
+		ss2ProgMu.Lock()
+		ss2Prog.Current = j.ID
+		ss2ProgMu.Unlock()
+
+		if err := fetchAndSaveSS2(j.RemoteUUID, j.ID); err != nil {
+			ss2ProgMu.Lock()
+			ss2Prog.Errors = append(ss2Prog.Errors, map[string]string{"job_id": j.ID, "variant": j.VariantCode, "error": err.Error()})
+			ss2Prog.PerJob[j.ID] = err.Error()
+			ss2Prog.Done++
+			ss2ProgMu.Unlock()
+		} else {
+			ss2ProgMu.Lock()
+			ss2Prog.PerJob[j.ID] = "ok"
+			ss2Prog.Done++
+			ss2ProgMu.Unlock()
+		}
+		// small pause to be polite to remote server
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	ss2ProgMu.Lock()
+	ss2Prog.Running = false
+	ss2Prog.Current = ""
+	ss2ProgMu.Unlock()
+}
+
+// API to start bulk .ss2 download
+func apiStartSS2DownloadAllHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ss2ProgMu.Lock()
+		if ss2Prog.Running {
+			// already running
+			resp := map[string]string{"error": "already_running"}
+			ss2ProgMu.Unlock()
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(resp)
+			return
+		}
+		ss2ProgMu.Unlock()
+		// start background worker (runSS2DownloadAll will initialize ss2Prog and set Running)
+		go runSS2DownloadAll()
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(map[string]string{"started": "ok"})
+	}
+}
+
+// API to fetch status of bulk .ss2 download
+func apiSS2DownloadStatusHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ss2ProgMu.Lock()
+		out := ss2Prog
+		ss2ProgMu.Unlock()
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(out)
+	}
+}
+
 // psipredStatusHandler proxies a status check to PSIPRED for a given UUID
 func psipredStatusHandler(psipredBase string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1738,7 +1964,34 @@ func psipredJobsHandler(dbPath string, psipredBase string) http.HandlerFunc {
 		}
 		// sort jobs by CreatedAt desc so most recent submissions appear first
 		sort.Slice(jobs, func(i, j int) bool { return jobs[j].CreatedAt.Before(jobs[i].CreatedAt) })
-		if err := templates.ExecuteTemplate(w, "psipred_jobs.html", jobs); err != nil {
+		// support optional filtering via query params
+		q := strings.TrimSpace(r.URL.Query().Get("q"))
+		stateFilter := strings.TrimSpace(r.URL.Query().Get("state"))
+		// when no query nor state provided, default to showing completed jobs
+		defaultToComplete := (q == "" && stateFilter == "")
+		filtered := make([]PsipredJob, 0, len(jobs))
+		for _, j := range jobs {
+			if q != "" {
+				if !strings.Contains(strings.ToLower(j.VariantCode), strings.ToLower(q)) && !strings.Contains(strings.ToLower(j.ID), strings.ToLower(q)) {
+					continue
+				}
+			}
+			if stateFilter != "" {
+				if !strings.EqualFold(j.State, stateFilter) && !strings.EqualFold(j.RemoteState, stateFilter) {
+					continue
+				}
+			} else if defaultToComplete {
+				// only include jobs that are complete either locally or remotely
+				if !(strings.EqualFold(j.State, "complete") || strings.EqualFold(j.RemoteState, "complete")) {
+					continue
+				}
+			}
+			filtered = append(filtered, j)
+		}
+		page := PsipredJobsPage{Jobs: filtered, Failures: []PsipredJob{}, Query: q, FilterState: stateFilter}
+		log.Printf("psipredJobsHandler: page type %T, jobs len=%d", page, len(page.Jobs))
+		if err := templates.ExecuteTemplate(w, "psipred_jobs.html", page); err != nil {
+			log.Printf("psipredJobsHandler: template execute error: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1775,8 +2028,31 @@ func psipredJobsFragmentHandler(dbPath string, psipredBase string) http.HandlerF
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		// sort jobs by CreatedAt desc for the fragment too
 		sort.Slice(jobs, func(i, j int) bool { return jobs[j].CreatedAt.Before(jobs[i].CreatedAt) })
-		// execute the whole template so it includes the table; HTMX will replace the element
-		if err := templates.ExecuteTemplate(w, "psipred_jobs.html", jobs); err != nil {
+		q := strings.TrimSpace(r.URL.Query().Get("q"))
+		stateFilter := strings.TrimSpace(r.URL.Query().Get("state"))
+		defaultToComplete := (q == "" && stateFilter == "")
+		filtered := make([]PsipredJob, 0, len(jobs))
+		for _, j := range jobs {
+			if q != "" {
+				if !strings.Contains(strings.ToLower(j.VariantCode), strings.ToLower(q)) && !strings.Contains(strings.ToLower(j.ID), strings.ToLower(q)) {
+					continue
+				}
+			}
+			if stateFilter != "" {
+				if !strings.EqualFold(j.State, stateFilter) && !strings.EqualFold(j.RemoteState, stateFilter) {
+					continue
+				}
+			} else if defaultToComplete {
+				if !(strings.EqualFold(j.State, "complete") || strings.EqualFold(j.RemoteState, "complete")) {
+					continue
+				}
+			}
+			filtered = append(filtered, j)
+		}
+		// render only the fragment with the slice as the root to avoid template root mismatch
+		log.Printf("psipredJobsFragmentHandler: rendering fragment with %d jobs", len(filtered))
+		if err := templates.ExecuteTemplate(w, "psipred_jobs_fragment.html", filtered); err != nil {
+			log.Printf("psipredJobsFragmentHandler: template execute error: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1967,6 +2243,9 @@ func main() {
 	mux.HandleFunc("/api/psipred/failures", apiPsipredFailuresHandler())
 	mux.HandleFunc("/api/psipred/pollers", apiPollersHandler())
 	mux.HandleFunc("/api/psipred/pollers/cancel/", cancelPollerHandler())
+	// ss2 bulk download APIs
+	mux.HandleFunc("/api/psipred/download-ss2/all", apiStartSS2DownloadAllHandler())
+	mux.HandleFunc("/api/psipred/download-ss2/status", apiSS2DownloadStatusHandler())
 	mux.HandleFunc("/pollers", pollersAdminHandler())
 	mux.HandleFunc("/pollers/fragment", pollersFragmentHandler())
 

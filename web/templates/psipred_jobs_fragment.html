@@ -1,0 +1,38 @@
+{{/* fragment rendering only the jobs table body for HTMX swaps - expects []main.PsipredJob as root */}}
+<table class="jobs" id="psipred-jobs-table">
+    <thead>
+        <tr>
+            <th>Job ID</th>
+            <th>Variant</th>
+            <th>Remote UUID</th>
+            <th>Status</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody id="psipred-jobs-tbody">
+        {{- if . }}
+        {{- range . }}
+        <tr>
+            <td><code>{{ .ID }}</code></td>
+            <td><a href="/variant/{{ .VariantCode }}">{{ .VariantCode }}</a></td>
+            <td>{{ if .RemoteUUID }}<a href="/psipred/job/{{ .RemoteUUID }}">{{ .RemoteUUID }}</a>{{ else }}—{{ end }}
+            </td>
+            <td>
+                {{ $s := .State }}
+                {{ if .RemoteState }}
+                {{ $s = .RemoteState }}
+                {{ end }}
+                <span class="badge">{{ $s }}</span>
+            </td>
+            <td>
+                <a class="btn secondary view-link" href="/psipred/job/{{ or .RemoteUUID .ID }}">Ver</a>
+            </td>
+        </tr>
+        {{- end }}
+        {{- else }}
+        <tr>
+            <td colspan="5" class="meta">Nenhum job PSIPRED encontrado com esse filtro.</td>
+        </tr>
+        {{- end }}
+    </tbody>
+</table>

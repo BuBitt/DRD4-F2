@@ -20,46 +20,38 @@
                 </div>
                 <div>
                     <button id="psipred-submit-all" class="btn">Enviar todos</button>
+                    <button id="psipred-download-ss2-all" class="btn" style="margin-left:8px">Baixar .ss2
+                        (todos)</button>
                 </div>
             </div>
 
-            {{ if . }}
-            <table class="jobs" id="psipred-jobs-table" hx-get="/psipred-jobs/fragment" hx-trigger="every 30s"
-                hx-swap="outerHTML">
-                <thead>
-                    <tr>
-                        <th>Job ID</th>
-                        <th>Variant</th>
-                        <th>Remote UUID</th>
-                        <th>Status</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody id="psipred-jobs-tbody">
-                    {{ range . }}
-                    <tr>
-                        <td><code>{{ .ID }}</code></td>
-                        <td><a href="/variant/{{ .VariantCode }}">{{ .VariantCode }}</a></td>
-                        <td>{{ if .RemoteUUID }}<a href="/psipred/job/{{ .RemoteUUID }}">{{ .RemoteUUID }}</a>{{ else
-                            }}—{{ end }}</td>
-                        <td>
-                            {{/* Prefer remote state if available, otherwise show local state */}}
-                            {{ $s := .State }}
-                            {{ if .RemoteState }}
-                            {{ $s = .RemoteState }}
-                            {{ end }}
-                            <span class="badge">{{ $s }}</span>
-                        </td>
-                        <td>
-                            <a class="btn secondary view-link" href="/psipred/job/{{ or .RemoteUUID .ID }}">Ver</a>
-                        </td>
-                    </tr>
-                    {{ end }}
-                </tbody>
-            </table>
-            {{ else }}
-            <div class="meta">Nenhum job PSIPRED encontrado.</div>
-            {{ end }}
+            <!-- Filter form (themed) -->
+            <form id="psipred-jobs-filter" class="filter-form" method="get" action="/psipred-jobs"
+                aria-label="Filtrar PSIPRED jobs">
+                <label class="sr-only" for="psipred-filter-q">Filtrar por variante ou job id</label>
+                <input id="psipred-filter-q" class="input search" type="search" name="q"
+                    placeholder="filtrar por variante ou job id" value="{{ .Query }}" />
+
+                <label class="sr-only" for="psipred-filter-state">Estado</label>
+                <select id="psipred-filter-state" class="input" name="state">
+                    <option value="" {{ if eq .FilterState "" }}selected{{ end }}>Todos estados</option>
+                    <option value="queued" {{ if eq .FilterState "queued" }}selected{{ end }}>queued</option>
+                    <option value="submitting" {{ if eq .FilterState "submitting" }}selected{{ end }}>submitting
+                    </option>
+                    <option value="submitted" {{ if eq .FilterState "submitted" }}selected{{ end }}>submitted</option>
+                    <option value="polling" {{ if eq .FilterState "polling" }}selected{{ end }}>polling</option>
+                    <option value="complete" {{ if eq .FilterState "complete" }}selected{{ end }}>complete</option>
+                    <option value="error" {{ if eq .FilterState "error" }}selected{{ end }}>error</option>
+                </select>
+
+                <div style="display:flex; gap:8px;">
+                    <button class="btn" type="submit">Aplicar</button>
+                    <button id="psipred-clear-filter" class="btn secondary" type="button">Limpar</button>
+                </div>
+            </form>
+
+            {{/* delegate full table rendering to the fragment template which expects []PsipredJob as root */}}
+            {{ template "psipred_jobs_fragment.html" .Jobs }}
 
             <!-- Failures summary (filled by client via API) -->
             <section id="psipred-failures" style="margin-top:18px; display:none">
@@ -86,6 +78,24 @@
                 </div>
             </div>
 
+            <!-- SS2 download modal -->
+            <div id="psipred-ss2-modal" class="modal" aria-hidden="true" role="dialog">
+                <div class="modal-backdrop" data-dismiss="modal"></div>
+                <div class="modal-panel">
+                    <header class="modal-header">
+                        <h3>Baixar .ss2 — progresso</h3>
+                        <button class="btn secondary" id="psipred-ss2-close">Fechar</button>
+                    </header>
+                    <div class="modal-body">
+                        <div id="psipred-ss2-summary">Preparando...</div>
+                        <div class="progress" style="margin-top:12px">
+                            <div id="psipred-ss2-bar" class="progress-bar" style="width:0%"></div>
+                        </div>
+                        <ul id="psipred-ss2-list" style="margin-top:12px; max-height:240px; overflow:auto"></ul>
+                    </div>
+                </div>
+            </div>
+
         </main>
     </div>
     <!-- Modal for job details -->
@@ -104,3 +114,4 @@
 </body>
 
 </html>
+<script src="/static/app.js" defer></script>
