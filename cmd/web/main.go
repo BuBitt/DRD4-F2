@@ -122,6 +122,11 @@ var auditMaxBytes int64 = 10 * 1024 * 1024 // 10 MB
 var auditMaxBackups int = 5
 var psipredBaseURL string
 
+// Reusable HTTP clients with different timeouts to avoid repeated allocations
+var httpClientDefault = &http.Client{Timeout: 20 * time.Second}
+var httpClientShort = &http.Client{Timeout: 5 * time.Second}
+var httpClientLong = &http.Client{Timeout: 30 * time.Second}
+
 // initJobsDB ensures the sqlite database file exists, opens a connection and ensures schema
 func initJobsDB(path string) error {
 	if jobsDB != nil {
@@ -158,50 +163,26 @@ func initJobsDB(path string) error {
 		db.Close()
 		return fmt.Errorf("failed to ensure jobs table: %v", err)
 	}
-	// migrate existing table: ensure 'email' column exists
+	// migrate existing table: ensure expected columns exist (single PRAGMA scan)
 	cols, err := db.Query("PRAGMA table_info(jobs);")
 	if err == nil {
-		found := false
+		defer cols.Close()
+		have := map[string]bool{}
 		for cols.Next() {
 			var cid int
 			var name, ctype string
 			var notnull, dfltValue, pk interface{}
 			_ = cols.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk)
-			if name == "email" {
-				found = true
-				break
-			}
+			have[name] = true
 		}
-		cols.Close()
-		if !found {
+		if !have["email"] {
 			if _, err := db.Exec("ALTER TABLE jobs ADD COLUMN email TEXT"); err != nil {
-				// log and continue
 				log.Printf("failed to add email column to jobs table: %v", err)
 			} else {
 				log.Printf("migrated jobs table: added email column")
 			}
 		}
-		// ensure remote_state column exists
-		// (older DBs may not have it)
-		foundRemote := false
-		cols, err := db.Query("PRAGMA table_info(jobs);")
-		if err == nil {
-			defer cols.Close()
-			for cols.Next() {
-				var cid int
-				var name string
-				var ctype string
-				var notnull int
-				var dflt interface{}
-				var pk int
-				_ = cols.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk)
-				if name == "remote_state" {
-					foundRemote = true
-					break
-				}
-			}
-		}
-		if !foundRemote {
+		if !have["remote_state"] {
 			if _, err := db.Exec("ALTER TABLE jobs ADD COLUMN remote_state TEXT"); err != nil {
 				log.Printf("failed to add remote_state column to jobs table: %v", err)
 			} else {
@@ -376,7 +357,7 @@ func fetchAndSaveSS2(remoteUUID, jobID string) error {
 		return fmt.Errorf("empty remote uuid")
 	}
 	// request JSON listing
-	cli := &http.Client{Timeout: 20 * time.Second}
+	cli := httpClientDefault
 	reqURL := strings.TrimRight(psipredBaseURL, "/") + "/submission/" + remoteUUID + "?format=json"
 	resp, err := cli.Get(reqURL)
 	if err != nil {
@@ -963,7 +944,7 @@ func psipredSubmitHandler(dbPath, psipredBase, psipredEmail string) http.Handler
 				case <-time.After(pollInterval):
 					// query remote status
 					reqURL := strings.TrimRight(psipredBase, "/") + "/submission/" + uuid
-					cli := &http.Client{Timeout: 20 * time.Second}
+					cli := httpClientDefault
 					resp, err := cli.Get(reqURL)
 					if err != nil {
 						continue
@@ -1125,7 +1106,7 @@ func submitVariantBackground(j PsipredJob, fasta []byte, dbPath, psipredBase str
 			return
 		case <-time.After(pollInterval):
 			reqURL := strings.TrimRight(psipredBase, "/") + "/submission/" + uuid
-			cli := &http.Client{Timeout: 20 * time.Second}
+			cli := httpClientDefault
 			resp, err := cli.Get(reqURL)
 			if err != nil {
 				continue
@@ -1346,7 +1327,7 @@ func startJobPoller(remoteUUID, jobID string) {
 			}(remoteUUID, jobID)
 		}()
 
-		cli := &http.Client{Timeout: 20 * time.Second}
+		cli := httpClientDefault
 
 		// Acquire semaphore to limit concurrent pollers if configured
 		acquired := false
@@ -1676,6 +1657,15 @@ func pollersFragmentHandler() http.HandlerFunc {
 
 // resolveVariantFromJob looks up persisted jobs to find the variant code for a job id.
 func resolveVariantFromJob(jobID string) string {
+	// If using sqlite, query directly to avoid loading entire table
+	if jobsStore == "sqlite" && jobsDB != nil {
+		var variant sql.NullString
+		err := jobsDB.QueryRow("SELECT variant_code FROM jobs WHERE id = ?", jobID).Scan(&variant)
+		if err == nil && variant.Valid {
+			return variant.String
+		}
+		return ""
+	}
 	jobs, err := loadJobs(jobsPath)
 	if err != nil {
 		return ""
@@ -1921,7 +1911,7 @@ func psipredStatusHandler(psipredBase string) http.HandlerFunc {
 			return
 		}
 		reqURL := strings.TrimRight(psipredBase, "/") + "/submission/" + uuid
-		cli := &http.Client{Timeout: 30 * time.Second}
+		cli := httpClientLong
 		resp, err := cli.Get(reqURL)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("failed to contact psipred: %v", err), http.StatusInternalServerError)
@@ -1948,7 +1938,7 @@ func psipredJobsHandler(dbPath string, psipredBase string) http.HandlerFunc {
 		for i := range jobs {
 			if jobs[i].RemoteUUID != "" && jobs[i].RemoteState == "" {
 				reqURL := strings.TrimRight(psipredBase, "/") + "/submission/" + jobs[i].RemoteUUID
-				cli := &http.Client{Timeout: 5 * time.Second}
+				cli := httpClientShort
 				resp, err := cli.Get(reqURL)
 				if err == nil {
 					body, _ := io.ReadAll(resp.Body)
@@ -2010,7 +2000,7 @@ func psipredJobsFragmentHandler(dbPath string, psipredBase string) http.HandlerF
 		for i := range jobs {
 			if jobs[i].RemoteUUID != "" && jobs[i].RemoteState == "" {
 				reqURL := strings.TrimRight(psipredBase, "/") + "/submission/" + jobs[i].RemoteUUID
-				cli := &http.Client{Timeout: 5 * time.Second}
+				cli := httpClientShort
 				resp, err := cli.Get(reqURL)
 				if err == nil {
 					body, _ := io.ReadAll(resp.Body)

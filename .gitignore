@@ -36,7 +36,7 @@ pkg/
 *.log
 drd4_ncbi_cache.json
 /.cache/
-
+access.log
 # Test output
 *.out
 
