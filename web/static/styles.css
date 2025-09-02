@@ -45,6 +45,19 @@ h3 {
     font-size: 16px;
 }
 
+/* Constrain only the title box width; content below can occupy the full panel width (respects panel padding) */
+.detail-title {
+    max-width: 560px;
+    /* distance/width of the title box */
+    margin-bottom: 12px;
+}
+
+@media(max-width:880px) {
+    .detail-title {
+        max-width: 100%;
+    }
+}
+
 
 .nav-btn {
     display: inline-flex;
@@ -124,7 +137,7 @@ h3 {
 .app {
     --left-col: 320px;
     /* default left column width */
-    --max-expand: 900px;
+    --max-expand: 1200px;
     /* default maximum expansion for detail */
     display: grid;
     /* left column adapts between a minimum and the role-based preferred width */
@@ -146,6 +159,13 @@ h3 {
     /* let content determine height so it adapts */
 }
 
+/* Make the left variants column scrollable so the menu doesn't grow indefinitely */
+.left {
+    overflow: auto;
+    /* compute a max height that leaves room for header and page padding; adjust 140px as needed */
+    max-height: calc(100vh - 140px);
+}
+
 .right {
     min-height: 0;
 }
@@ -153,8 +173,8 @@ h3 {
 
 .list {
     max-height: none;
-    overflow: visible;
-    /* do not show scrollbars; allow the list to expand vertically */
+    overflow: auto;
+    /* allow the list to scroll within the left column */
 }
 
 .item {
@@ -172,6 +192,31 @@ h3 {
 
 .item:hover {
     box-shadow: 0 4px 14px rgba(16, 24, 40, 0.06)
+}
+
+/* variants already sent to PSIPRED */
+.item.sent {
+    background: linear-gradient(180deg, #f8fffb 0%, #f1f9f3 100%);
+    border-color: #daf6e6;
+}
+
+.item.sent .code {
+    background: #ecfdf5;
+    color: #065f46;
+}
+
+
+/* explicit small badge inserted in markup */
+.sent-badge {
+    display: inline-block;
+    font-size: 12px;
+    color: #065f46;
+    background: rgba(6, 95, 70, 0.08);
+    border: 1px solid rgba(11, 77, 53, 0.08);
+    padding: 4px 8px;
+    border-radius: 999px;
+    margin-left: 8px;
+    vertical-align: middle;
 }
 
 .code {
@@ -329,30 +374,30 @@ table.jobs th {
 
 /* Role-based layout tweaks: smaller expansion for guest, more for researchers/admins */
 body[data-role="guest"] .container {
-    max-width: 980px;
+    max-width: 1100px;
 }
 
 body[data-role="guest"] .app {
     --left-col: 300px;
-    --max-expand: 780px;
+    --max-expand: 1000px;
 }
 
 body[data-role="researcher"] .container {
-    max-width: 1200px;
+    max-width: 1400px;
 }
 
 body[data-role="researcher"] .app {
     --left-col: 360px;
-    --max-expand: 980px;
+    --max-expand: 1200px;
 }
 
 body[data-role="admin"] .container {
-    max-width: 1400px;
+    max-width: 1600px;
 }
 
 body[data-role="admin"] .app {
     --left-col: 420px;
-    --max-expand: 1100px;
+    --max-expand: 1400px;
 }
 
 /* Ensure main detail area respects max expansion */
@@ -426,4 +471,33 @@ body[data-role="admin"] .app {
     background: #f7fafc;
     padding: 12px;
     border-radius: 8px
+}
+
+/* progress bar for submit-all */
+.progress {
+    height: 12px;
+    background: #edf2ff;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent) 0%, var(--accent-2) 100%);
+    width: 0%;
+    transition: width 300ms ease;
+}
+
+/* failures list */
+#psipred-failures {
+    margin-top: 12px
+}
+
+#psipred-failures-list {
+    margin-top: 8px;
+    padding-left: 18px
+}
+
+#psipred-failures-list li {
+    margin-bottom: 8px
 }

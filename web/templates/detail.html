@@ -1,7 +1,7 @@
 {{/* detail.html - single clean fragment for a variant */}}
 <div class="panel">
     <div class="detail-title">
-        <h2 style="margin:0">{{.VariantCode}}</h2>
+        <h2 style="margin:0">{{.VariantCode}} {{ if .PsipredUUID }}<span class="sent-badge">Enviado</span>{{ end }}</h2>
         <div class="meta">— {{.Name}}</div>
     </div>
 

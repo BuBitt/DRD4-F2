@@ -17,9 +17,8 @@
             <h2>Pollers ativos</h2>
             <p class="meta">Gerencie pollers ativos e cancele manualmente, se necessário.</p>
 
-            {{ if . }}
-            <table class="jobs" id="pollers-table" hx-get="/pollers/fragment" hx-trigger="every 10s"
-                hx-swap="outerHTML">
+            {{ if gt (len .) 0 }}
+            <table class="jobs" id="pollers-table">
                 <thead>
                     <tr>
                         <th>Variante</th>
@@ -30,7 +29,7 @@
                         <th>Ações</th>
                     </tr>
                 </thead>
-                <tbody id="pollers-tbody">
+                <tbody id="pollers-tbody" hx-get="/pollers/fragment" hx-trigger="every 10s" hx-swap="innerHTML">
                     {{ template "pollers_fragment.html" . }}
                 </tbody>
             </table>

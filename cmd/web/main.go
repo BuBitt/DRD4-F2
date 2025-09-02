@@ -63,12 +63,23 @@ type PsipredJob struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+// View model for the PSIPRED jobs page
+type PsipredJobsPage struct {
+	Jobs     []PsipredJob
+	Failures []PsipredJob
+}
+
 var jobsPath string
 var jobsMu sync.Mutex
 var jobsStore string // "json" or "sqlite"
 var jobsDB *sql.DB
 var pollInterval time.Duration
 var pollTimeout time.Duration
+
+// submit-all protection token and concurrency
+var submitAllToken string
+var submitAllConcurrency int
+var submitAllSem chan struct{}
 
 // PollerInfo holds runtime information about a poller for a given remote UUID
 type PollerInfo struct {
@@ -366,6 +377,53 @@ func cleanSequence(s string) string {
 	return out.String()
 }
 
+// detect rate-limit-like errors from remote services
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	se := strings.ToLower(err.Error())
+	if strings.Contains(se, "429") || strings.Contains(se, "too many requests") || strings.Contains(se, "rate limit") || strings.Contains(se, "rate-limited") {
+		return true
+	}
+	return false
+}
+
+// submitWithRetries will attempt to submit to PSIPRED and retry on rate-limit errors with
+// exponential backoff until ctx is done or attempts exhausted.
+func submitWithRetries(ctx context.Context, base, tool, variant, email string, fasta []byte) (string, error) {
+	var lastErr error
+	backoff := 5 * time.Second
+	maxAttempts := 6
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		uuid, err := psipred.SubmitJob(ctx, base, tool, variant, email, fasta, nil)
+		if err == nil {
+			return uuid, nil
+		}
+		lastErr = err
+		if !isRateLimitError(err) {
+			return "", err
+		}
+		// audit rate-limited event
+		go auditAppend(map[string]interface{}{"timestamp": time.Now().Format(time.RFC3339), "event": "submit_rate_limited", "variant": variant, "attempt": attempt, "err": err.Error()})
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(backoff):
+			// increase backoff but cap it
+			backoff *= 2
+			if backoff > 2*time.Minute {
+				backoff = 2 * time.Minute
+			}
+			continue
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("submit failed after retries")
+	}
+	return "", lastErr
+}
+
 // statusResponseWriter captures status and bytes written for logging
 type statusResponseWriter struct {
 	http.ResponseWriter
@@ -655,7 +713,7 @@ func psipredSubmitHandler(dbPath, psipredBase, psipredEmail string) http.Handler
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 			defer cancel()
 			// use the job's email when submitting
-			uuid, err := psipred.SubmitJob(ctx, psipredBase, "psipred", j.VariantCode, j.Email, fastaBytes, nil)
+			uuid, err := submitWithRetries(ctx, psipredBase, "psipred", j.VariantCode, j.Email, fastaBytes)
 			if err != nil {
 				_ = persistJobUpdate(jobsPath, func(js []PsipredJob) ([]PsipredJob, error) {
 					for i := range js {
@@ -738,6 +796,14 @@ func psipredSubmitHandler(dbPath, psipredBase, psipredEmail string) http.Handler
 					if err != nil {
 						continue
 					}
+					// rate-limit handling
+					if resp.StatusCode == 429 || resp.StatusCode == 503 {
+						auditAppend(map[string]interface{}{"timestamp": time.Now().Format(time.RFC3339), "event": "poll_rate_limited", "remote_uuid": uuid, "status": resp.StatusCode})
+						resp.Body.Close()
+						// simple backoff before next tick
+						time.Sleep(10 * time.Second)
+						continue
+					}
 					body, _ := io.ReadAll(resp.Body)
 					resp.Body.Close()
 					var m map[string]interface{}
@@ -786,6 +852,239 @@ func psipredSubmitHandler(dbPath, psipredBase, psipredEmail string) http.Handler
 	}
 }
 
+// helper to perform background submission for a created job (reused by submit-all)
+func submitVariantBackground(j PsipredJob, fasta []byte, dbPath, psipredBase string) {
+	// mark submitting
+	_ = persistJobUpdate(jobsPath, func(js []PsipredJob) ([]PsipredJob, error) {
+		for i := range js {
+			if js[i].ID == j.ID {
+				js[i].State = "submitting"
+				js[i].UpdatedAt = time.Now()
+			}
+		}
+		return js, nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	// respect submit-all concurrency limit if configured
+	if submitAllSem != nil {
+		select {
+		case submitAllSem <- struct{}{}:
+			defer func() { <-submitAllSem }()
+		default:
+			// if semaphore is full, block until slot available
+			submitAllSem <- struct{}{}
+			defer func() { <-submitAllSem }()
+		}
+	}
+	uuid, err := submitWithRetries(ctx, psipredBase, "psipred", j.VariantCode, j.Email, fasta)
+	if err != nil {
+		_ = persistJobUpdate(jobsPath, func(js []PsipredJob) ([]PsipredJob, error) {
+			for i := range js {
+				if js[i].ID == j.ID {
+					js[i].State = "error"
+					js[i].Message = err.Error()
+					js[i].UpdatedAt = time.Now()
+				}
+			}
+			return js, nil
+		})
+		return
+	}
+	_ = persistJobUpdate(jobsPath, func(js []PsipredJob) ([]PsipredJob, error) {
+		for i := range js {
+			if js[i].ID == j.ID {
+				js[i].RemoteUUID = uuid
+				js[i].State = "submitted"
+				js[i].RemoteState = "submitted"
+				js[i].UpdatedAt = time.Now()
+			}
+		}
+		return js, nil
+	})
+
+	// persist uuid into database.json
+	go func(uuid string, variantCode string, dbPath string) {
+		variants, err := readDatabase(dbPath)
+		if err != nil {
+			return
+		}
+		updated := false
+		for i := range variants {
+			if variants[i].VariantCode == variantCode {
+				variants[i].PsipredUUID = uuid
+				updated = true
+				break
+			}
+		}
+		if !updated {
+			return
+		}
+		tmp := dbPath + ".tmp"
+		b, err := json.MarshalIndent(variants, "", "  ")
+		if err != nil {
+			return
+		}
+		if err := os.WriteFile(tmp, b, 0644); err != nil {
+			return
+		}
+		_ = os.Rename(tmp, dbPath)
+	}(uuid, j.VariantCode, dbPath)
+
+	// start poller
+	startJobPoller(uuid, j.ID)
+	// light poll loop (same as submit handler)
+	pollCtx, pollCancel := context.WithTimeout(context.Background(), pollTimeout)
+	defer pollCancel()
+	for {
+		select {
+		case <-pollCtx.Done():
+			_ = persistJobUpdate(jobsPath, func(js []PsipredJob) ([]PsipredJob, error) {
+				for i := range js {
+					if js[i].ID == j.ID {
+						js[i].State = "error"
+						js[i].Message = "poll timeout"
+						js[i].UpdatedAt = time.Now()
+					}
+				}
+				return js, nil
+			})
+			return
+		case <-time.After(pollInterval):
+			reqURL := strings.TrimRight(psipredBase, "/") + "/submission/" + uuid
+			cli := &http.Client{Timeout: 20 * time.Second}
+			resp, err := cli.Get(reqURL)
+			if err != nil {
+				continue
+			}
+			if resp.StatusCode == 429 || resp.StatusCode == 503 {
+				auditAppend(map[string]interface{}{"timestamp": time.Now().Format(time.RFC3339), "event": "poll_rate_limited", "remote_uuid": uuid, "status": resp.StatusCode})
+				resp.Body.Close()
+				time.Sleep(10 * time.Second)
+				continue
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			var m map[string]interface{}
+			if err := json.Unmarshal(body, &m); err != nil {
+				continue
+			}
+			state := ""
+			if s, ok := m["state"].(string); ok {
+				state = s
+			}
+			if strings.EqualFold(state, "Complete") {
+				_ = persistJobUpdate(jobsPath, func(js []PsipredJob) ([]PsipredJob, error) {
+					for i := range js {
+						if js[i].ID == j.ID {
+							js[i].State = "complete"
+							js[i].RemoteState = "complete"
+							js[i].UpdatedAt = time.Now()
+						}
+					}
+					return js, nil
+				})
+				return
+			}
+			if strings.EqualFold(state, "Error") {
+				_ = persistJobUpdate(jobsPath, func(js []PsipredJob) ([]PsipredJob, error) {
+					for i := range js {
+						if js[i].ID == j.ID {
+							js[i].State = "error"
+							js[i].RemoteState = "error"
+							if v, ok := m["last_message"].(string); ok {
+								js[i].Message = v
+							}
+							js[i].UpdatedAt = time.Now()
+						}
+					}
+					return js, nil
+				})
+				return
+			}
+		}
+	}
+}
+
+// handler to submit all unsent variants to PSIPRED
+func psipredSubmitAllHandler(dbPath, psipredBase, psipredEmail string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if psipredBase == "" {
+			http.Error(w, "PSIPRED não configurado no servidor", http.StatusBadRequest)
+			return
+		}
+		// token check if configured
+		if submitAllToken != "" {
+			got := r.Header.Get("X-Submit-All-Token")
+			if got == "" || got != submitAllToken {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+		// load variants and jobs
+		variants, err := readDatabase(dbPath)
+		if err != nil {
+			http.Error(w, "failed to read database", http.StatusInternalServerError)
+			return
+		}
+		jobs, _ := loadJobs(jobsPath)
+		// build set of variant codes already submitted or with active job
+		submitted := map[string]bool{}
+		for _, j := range jobs {
+			if j.VariantCode != "" {
+				if strings.EqualFold(j.State, "complete") || strings.EqualFold(j.State, "error") {
+					// final - treat as submitted
+					submitted[j.VariantCode] = true
+				} else if j.RemoteUUID != "" || j.State != "queued" {
+					// already in flight or has remote uuid
+					submitted[j.VariantCode] = true
+				}
+			}
+		}
+		// return created entries as {variant, job_id} so client can track progress
+		created := []map[string]string{}
+		for _, v := range variants {
+			if submitted[v.VariantCode] {
+				continue
+			}
+			seq := v.TranslateMergedRef
+			if strings.TrimSpace(seq) == "" {
+				continue
+			}
+			clean := cleanSequence(seq)
+			if clean == "" {
+				continue
+			}
+			fasta := fmt.Sprintf("%s\n", clean)
+			jobID := fmt.Sprintf("job-%d-%d", time.Now().UnixNano(), os.Getpid())
+			randEmail := generateRandomEmail()
+			job := PsipredJob{
+				ID:          jobID,
+				VariantCode: v.VariantCode,
+				State:       "queued",
+				Email:       randEmail,
+				CreatedAt:   time.Now(),
+				UpdatedAt:   time.Now(),
+			}
+			if err := persistJobUpdate(jobsPath, func(js []PsipredJob) ([]PsipredJob, error) {
+				js = append(js, job)
+				return js, nil
+			}); err != nil {
+				// skip on error
+				continue
+			}
+			// fire background submission
+			go submitVariantBackground(job, []byte(fasta), dbPath, psipredBase)
+			created = append(created, map[string]string{"variant": v.VariantCode, "job_id": jobID})
+			// small sleep to avoid hammering
+			time.Sleep(250 * time.Millisecond)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"created": created})
+	}
+}
+
 // api to fetch job status by job id
 func apiPsipredJobHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -821,6 +1120,8 @@ func apiPsipredJobsListHandler() http.HandlerFunc {
 			http.Error(w, "failed to read jobs", http.StatusInternalServerError)
 			return
 		}
+		// sort by CreatedAt desc
+		sort.Slice(jobs, func(i, j int) bool { return jobs[j].CreatedAt.Before(jobs[i].CreatedAt) })
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		_ = json.NewEncoder(w).Encode(jobs)
 	}
@@ -917,6 +1218,12 @@ func startJobPoller(remoteUUID, jobID string) {
 				if err != nil {
 					continue
 				}
+				if resp.StatusCode == 429 || resp.StatusCode == 503 {
+					auditAppend(map[string]interface{}{"timestamp": time.Now().Format(time.RFC3339), "event": "poll_rate_limited", "remote_uuid": remoteUUID, "status": resp.StatusCode})
+					resp.Body.Close()
+					time.Sleep(10 * time.Second)
+					continue
+				}
 				body, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
 				var m map[string]interface{}
@@ -993,7 +1300,12 @@ func pollersAdminHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// prepare view model with human-readable timestamps (same shape as fragment handler)
 		jobsPollersMu.Lock()
-		view := map[string]map[string]string{}
+		// build ordered slice of pollers (so we can sort by StartedAt desc)
+		type pollerEntry struct {
+			UUID string
+			M    map[string]string
+		}
+		entries := []pollerEntry{}
 		for uuid, p := range jobsPollers {
 			m := map[string]string{}
 			variant := resolveVariantFromJob(p.JobID)
@@ -1012,10 +1324,16 @@ func pollersAdminHandler() http.HandlerFunc {
 			} else {
 				m["acquired_at"] = "-"
 			}
-			view[uuid] = m
+			entries = append(entries, pollerEntry{UUID: uuid, M: m})
 		}
 		jobsPollersMu.Unlock()
-		if err := templates.ExecuteTemplate(w, "pollers.html", view); err != nil {
+		// sort by started_at desc
+		sort.Slice(entries, func(i, j int) bool {
+			ti, _ := time.Parse("2006-01-02 15:04:05", entries[i].M["started_at"])
+			tj, _ := time.Parse("2006-01-02 15:04:05", entries[j].M["started_at"])
+			return tj.Before(ti)
+		})
+		if err := templates.ExecuteTemplate(w, "pollers.html", entries); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1026,8 +1344,14 @@ func pollersAdminHandler() http.HandlerFunc {
 func pollersFragmentHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		jobsPollersMu.Lock()
-		// prepare a human-friendly view model
-		view := map[string]map[string]string{}
+		// prepare ordered slice of pollers and a jobID map
+		type pollerEntry struct {
+			UUID  string
+			M     map[string]string
+			JobID string
+		}
+		entries := []pollerEntry{}
+		jobMap := map[string]string{}
 		for uuid, p := range jobsPollers {
 			m := map[string]string{}
 			variant := resolveVariantFromJob(p.JobID)
@@ -1050,11 +1374,45 @@ func pollersFragmentHandler() http.HandlerFunc {
 				m["acquired_at"] = "-"
 				m["acquired_rel"] = "-"
 			}
-			view[uuid] = m
+			entries = append(entries, pollerEntry{UUID: uuid, M: m, JobID: p.JobID})
+			jobMap[uuid] = p.JobID
 		}
 		jobsPollersMu.Unlock()
+		// sort by started_at desc (recent first)
+		sort.Slice(entries, func(i, j int) bool {
+			// parse using the same layout
+			ti, _ := time.Parse("02 Jan 2006 15:04", entries[i].M["started_at"])
+			tj, _ := time.Parse("02 Jan 2006 15:04", entries[j].M["started_at"])
+			return tj.Before(ti)
+		})
+
+		// Defensive cleanup: remove pollers whose local job is already final (complete/error).
+		// This handles edge-cases where the poller goroutine didn't remove itself.
+		if len(entries) > 0 {
+			if jobs, err := loadJobs(jobsPath); err == nil {
+				// build a lookup of job id -> state
+				stateByJob := map[string]string{}
+				for _, j := range jobs {
+					stateByJob[j.ID] = j.State
+				}
+				for _, ent := range entries {
+					jid := ent.JobID
+					uuid := ent.UUID
+					if st, ok := stateByJob[jid]; ok {
+						if strings.EqualFold(st, "complete") || strings.EqualFold(st, "error") {
+							// remove from pollers map so it no longer appears
+							jobsPollersMu.Lock()
+							delete(jobsPollers, uuid)
+							jobsPollersMu.Unlock()
+							// audit cleanup
+							go auditAppend(map[string]interface{}{"timestamp": time.Now().Format(time.RFC3339), "event": "poller_autoremoved", "remote_uuid": uuid, "job_id": jid, "state": st})
+						}
+					}
+				}
+			}
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := templates.ExecuteTemplate(w, "pollers_fragment.html", view); err != nil {
+		if err := templates.ExecuteTemplate(w, "pollers_fragment.html", entries); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1123,19 +1481,33 @@ func humanAgo(t time.Time) string {
 func apiPollersHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		jobsPollersMu.Lock()
-		out := map[string]map[string]interface{}{}
+		type pollerOut struct {
+			UUID       string `json:"uuid"`
+			JobID      string `json:"job_id"`
+			StartedAt  string `json:"started_at"`
+			AcquiredAt string `json:"acquired_at,omitempty"`
+			Status     string `json:"status"`
+		}
+		outSlice := []pollerOut{}
 		for uuid, p := range jobsPollers {
-			info := map[string]interface{}{
-				"job_id":     p.JobID,
-				"started_at": p.StartedAt.Format(time.RFC3339),
-				"status":     p.Status,
+			info := pollerOut{
+				UUID:      uuid,
+				JobID:     p.JobID,
+				StartedAt: p.StartedAt.Format(time.RFC3339),
+				Status:    p.Status,
 			}
 			if p.AcquiredAt != nil {
-				info["acquired_at"] = p.AcquiredAt.Format(time.RFC3339)
+				info.AcquiredAt = p.AcquiredAt.Format(time.RFC3339)
 			}
-			out[uuid] = info
+			outSlice = append(outSlice, info)
 		}
 		jobsPollersMu.Unlock()
+		// sort by StartedAt desc
+		sort.Slice(outSlice, func(i, j int) bool {
+			ti, _ := time.Parse(time.RFC3339, outSlice[i].StartedAt)
+			tj, _ := time.Parse(time.RFC3339, outSlice[j].StartedAt)
+			return tj.Before(ti)
+		})
 
 		// semaphore info
 		semInfo := map[string]interface{}{
@@ -1148,7 +1520,7 @@ func apiPollersHandler() http.HandlerFunc {
 		}
 
 		resp := map[string]interface{}{
-			"pollers":   out,
+			"pollers":   outSlice,
 			"semaphore": semInfo,
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -1211,6 +1583,8 @@ func psipredJobsHandler(dbPath string, psipredBase string) http.HandlerFunc {
 				}
 			}
 		}
+		// sort jobs by CreatedAt desc so most recent submissions appear first
+		sort.Slice(jobs, func(i, j int) bool { return jobs[j].CreatedAt.Before(jobs[i].CreatedAt) })
 		if err := templates.ExecuteTemplate(w, "psipred_jobs.html", jobs); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -1246,6 +1620,8 @@ func psipredJobsFragmentHandler(dbPath string, psipredBase string) http.HandlerF
 		}
 		// render only the fragment - we reuse the same template but instruct callers to swap by outerHTML
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		// sort jobs by CreatedAt desc for the fragment too
+		sort.Slice(jobs, func(i, j int) bool { return jobs[j].CreatedAt.Before(jobs[i].CreatedAt) })
 		// execute the whole template so it includes the table; HTMX will replace the element
 		if err := templates.ExecuteTemplate(w, "psipred_jobs.html", jobs); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1289,8 +1665,29 @@ func apiPsipredJobsHandler(dbPath string) http.HandlerFunc {
 			http.Error(w, "failed to read psipred jobs", http.StatusInternalServerError)
 			return
 		}
+		// sort by CreatedAt desc for listing
+		sort.Slice(jobs, func(i, j int) bool { return jobs[j].CreatedAt.Before(jobs[i].CreatedAt) })
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		_ = json.NewEncoder(w).Encode(jobs)
+	}
+}
+
+// api to list failed jobs (error state)
+func apiPsipredFailuresHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		jobs, err := loadJobs(jobsPath)
+		if err != nil {
+			http.Error(w, "failed to read jobs", http.StatusInternalServerError)
+			return
+		}
+		failed := []PsipredJob{}
+		for _, j := range jobs {
+			if strings.EqualFold(j.State, "error") || strings.EqualFold(j.RemoteState, "error") {
+				failed = append(failed, j)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(failed)
 	}
 }
 
@@ -1303,6 +1700,8 @@ func main() {
 	logFile := flag.String("log", "", "path to write access logs (optional). If empty, logs go to stdout only")
 	psipredJobsFlag := flag.String("psipred-jobs", "psipred_jobs.json", "arquivo para persistir estados de jobs PSIPRED")
 	jobsStoreFlag := flag.String("psipred-store", "json", "psipred jobs store: 'json' or 'sqlite'")
+	submitAllTok := flag.String("submit-all-token", "", "token simples para proteger o endpoint /psipred/submit-all")
+	submitAllConc := flag.Int("submit-all-concurrency", 3, "quantidade máxima de submissões concorrentes do submit-all")
 	pollSec := flag.Int("psipred-poll-sec", 30, "intervalo de polling (segundos) para checar status remoto")
 	pollTimeoutMin := flag.Int("psipred-poll-timeout-min", 60, "timeout de polling (minutos) para aguardar job")
 	pollersMax := flag.Int("psipred-pollers-max", 5, "maximo de pollers concorrentes (0 = ilimitado)")
@@ -1331,6 +1730,13 @@ func main() {
 	pollerMax = *pollersMax
 	if pollerMax > 0 {
 		pollerSem = make(chan struct{}, pollerMax)
+	}
+
+	// submit-all protection and concurrency
+	submitAllToken = strings.TrimSpace(*submitAllTok)
+	submitAllConcurrency = *submitAllConc
+	if submitAllConcurrency > 0 {
+		submitAllSem = make(chan struct{}, submitAllConcurrency)
 	}
 	// initialize sqlite if requested
 	if jobsStore == "sqlite" {
@@ -1390,6 +1796,7 @@ func main() {
 	mux.HandleFunc("/variants", variantsHandler(*dbPath))
 	mux.HandleFunc("/variant/", variantHandler(*dbPath))
 	mux.HandleFunc("/psipred/submit/", psipredSubmitHandler(*dbPath, *psipredBase, *psipredEmail))
+	mux.HandleFunc("/psipred/submit-all", psipredSubmitAllHandler(*dbPath, *psipredBase, *psipredEmail))
 	mux.HandleFunc("/psipred/status/", psipredStatusHandler(*psipredBase))
 	mux.HandleFunc("/psipred/job/", psipredJobHandler(*dbPath))
 	mux.HandleFunc("/psipred-jobs", psipredJobsHandler(*dbPath, *psipredBase))
@@ -1401,6 +1808,7 @@ func main() {
 	jobsPath = *psipredJobsFlag
 	mux.HandleFunc("/api/psipred/job/", apiPsipredJobHandler())
 	mux.HandleFunc("/api/psipred/jobs/list", apiPsipredJobsListHandler())
+	mux.HandleFunc("/api/psipred/failures", apiPsipredFailuresHandler())
 	mux.HandleFunc("/api/psipred/pollers", apiPollersHandler())
 	mux.HandleFunc("/api/psipred/pollers/cancel/", cancelPollerHandler())
 	mux.HandleFunc("/pollers", pollersAdminHandler())

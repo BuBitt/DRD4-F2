@@ -3,15 +3,14 @@
 <ul style="list-style:none;padding:0;margin:0;">
     {{- range .}}
     <li style="margin:6px 0;">
-        <a class="item" href="/variant/{{.VariantCode}}">
+        <a class="item {{ if .PsipredUUID }}sent{{ end }}" href="/variant/{{.VariantCode}}">
             <div class="item-main">
                 <span class="code">{{.VariantCode}}</span>
                 <div class="item-name-small">{{.Name}}</div>
                 <div class="meta">Fonte: {{.TranslationSource}} • PB: {{.PBCount}} • AA: {{.AACount}}</div>
             </div>
-            {{- if .UnsubstitutedPositions }}
-            <div class="badge">⚑ {{len .UnsubstitutedPositions}}</div>
-            {{- end}}
+            {{/* removed flag count per request */}}
+            {{ if .PsipredUUID }}<span class="sent-badge">Enviado</span>{{ end }}
         </a>
     </li>
     {{- end}}

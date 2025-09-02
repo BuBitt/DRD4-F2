@@ -1,16 +1,16 @@
 {{define "pollers_fragment.html"}}
-{{range $uuid, $p := .}}
+{{range .}}
 <tr>
-    <td>{{$p.variant_id}}</td>
-    <td>{{if $uuid}}<a href="/psipred/job/{{$uuid}}">{{$uuid}}</a>{{else}}—{{end}}</td>
-    <td>{{$p.started_at}} <div class="meta">{{$p.started_rel}}</div>
+    <td>{{.M.variant_id}}</td>
+    <td>{{if .UUID}}<a href="/psipred/job/{{.UUID}}">{{.UUID}}</a>{{else}}—{{end}}</td>
+    <td>{{.M.started_at}} <div class="meta">{{.M.started_rel}}</div>
     </td>
-    <td>{{$p.acquired_at}} <div class="meta">{{$p.acquired_rel}}</div>
+    <td>{{.M.acquired_at}} <div class="meta">{{.M.acquired_rel}}</div>
     </td>
-    <td><span class="badge">{{$p.status}}</span></td>
+    <td><span class="badge">{{.M.status}}</span></td>
     <td>
-        <button class="btn secondary" hx-post="/api/psipred/pollers/cancel/{{$uuid}}" hx-swap="none"
-            hx-confirm="Cancelar poller {{$uuid}}?">Cancelar</button>
+        <button class="btn secondary" hx-post="/api/psipred/pollers/cancel/{{.UUID}}" hx-swap="none"
+            hx-confirm="Cancelar poller {{.UUID}}?">Cancelar</button>
     </td>
 </tr>
 {{else}}

@@ -48,6 +48,35 @@
                 openJobModal(last)
             })
         })
+
+        // submit-all button (PSIPRED Jobs page)
+        const submitAll = document.getElementById('psipred-submit-all')
+        if (submitAll) {
+            submitAll.addEventListener('click', async function (ev) {
+                ev.preventDefault()
+                if (!confirm('Enviar todas as variantes que ainda não foram enviadas para o PSIPRED?')) return
+                submitAll.disabled = true
+                const origText = submitAll.textContent
+                submitAll.textContent = 'Enviando...'
+                try {
+                    let res = await fetch('/psipred/submit-all', { method: 'POST' })
+                    if (res.status === 401) {
+                        const token = prompt('Endpoint protegido. Insira o token de submissão:')
+                        if (!token) throw new Error('token não fornecido')
+                        res = await fetch('/psipred/submit-all', { method: 'POST', headers: { 'X-Submit-All-Token': token } })
+                    }
+                    if (!res.ok) throw new Error(await res.text())
+                    const data = await res.json()
+                    // show created count
+                    const count = data.created ? data.created.length : 0
+                    alert('Submetidos: ' + count + ' variantes')
+                    // refresh jobs and pollers views
+                    setTimeout(() => { refreshJobsList(); }, 1000)
+                } catch (e) { alert('Falha: ' + e.message) }
+                submitAll.disabled = false
+                submitAll.textContent = origText
+            })
+        }
     }
 
     async function loadVariantDetail(path) {
@@ -117,28 +146,35 @@
         // wire confirm/cancel handlers
         const close = document.getElementById('fasta-preview-close')
         const cancel = document.getElementById('fasta-send-cancel')
-        const confirm = document.getElementById('fasta-send-confirm')
+        const confirmBtn = document.getElementById('fasta-send-confirm')
         const hide = () => { modal && modal.setAttribute('aria-hidden', 'true') }
-        const oneTime = async () => {
+        const oneTime = async (ev) => {
+            if (ev && ev.preventDefault) ev.preventDefault()
+            if (confirmBtn) confirmBtn.disabled = true
             // perform POST to server submit endpoint
             try {
                 const res = await fetch('/psipred/submit/' + variantCode, { method: 'POST' })
                 if (!res.ok) throw new Error(await res.text())
                 const data = await res.json()
                 hide()
+                // if the submit response already includes a remote_uuid, mark the variant as sent
+                try {
+                    const codeToMark = data && (data.variant_code || variantCode)
+                    if (data && data.remote_uuid && codeToMark) markVariantSent(codeToMark)
+                } catch (e) { /* ignore */ }
                 if (data && data.job_id) pollInternalJob(data.job_id)
             } catch (e) {
                 alert('Falha ao submeter: ' + e.message)
             } finally {
-                // cleanup handlers
-                confirm.removeEventListener('click', oneTime)
-                close.removeEventListener('click', hide)
-                cancel.removeEventListener('click', hide)
+                // cleanup handlers and re-enable button
+                if (confirmBtn) confirmBtn.disabled = false
+                try { if (confirmBtn) confirmBtn.removeEventListener('click', oneTime) } catch (e) { }
+                try { if (close) close.removeEventListener('click', hide) } catch (e) { }
+                try { if (cancel) cancel.removeEventListener('click', hide) } catch (e) { }
             }
         }
-        if (confirm) {
-            confirm.addEventListener('click', oneTime)
-        }
+        // attach handlers (use once option for confirm to be safe)
+        if (confirmBtn) confirmBtn.addEventListener('click', oneTime, { once: true })
         if (close) close.addEventListener('click', hide)
         if (cancel) cancel.addEventListener('click', hide)
     }
@@ -151,7 +187,36 @@
             if (!res.ok) { el && (el.textContent = 'Erro ao consultar'); return }
             const data = await res.json()
             el && (el.textContent = JSON.stringify(data))
+            // if job has remote_uuid, mark variant as sent in the menu
+            if (data.remote_uuid && data.variant_code) {
+                markVariantSent(data.variant_code)
+            }
         } catch (e) { console.error(e) }
+    }
+
+    // mark a variant in the left menu as sent (adds .sent class and a visible badge)
+    function markVariantSent(variantCode) {
+        if (!variantCode) return
+        try {
+            const selector = 'a.item[href="/variant/' + variantCode + '"]'
+            const a = document.querySelector(selector)
+            if (!a) return
+            if (!a.classList.contains('sent')) a.classList.add('sent')
+            // ensure sent-badge exists near the code element
+            if (!a.querySelector('.sent-badge')) {
+                const codeEl = a.querySelector('.code')
+                const badge = document.createElement('span')
+                badge.className = 'sent-badge'
+                badge.textContent = 'Enviado'
+                if (codeEl && codeEl.parentNode) {
+                    codeEl.parentNode.insertBefore(badge, codeEl.nextSibling)
+                } else {
+                    a.appendChild(badge)
+                }
+            }
+        } catch (e) {
+            // ignore
+        }
     }
 
     async function pollInternalJob(id) {
@@ -257,7 +322,131 @@
                     } catch (e) { alert('retry failed: ' + e.message) }
                 })
             })
+            // fetch failures and show
+            try {
+                const fres = await fetch('/api/psipred/failures')
+                if (fres.ok) {
+                    const fails = await fres.json()
+                    if (fails && fails.length) {
+                        const items = fails.map(f => ({ variant: f.variant_code || f.variantCode || f.VariantCode, job_id: f.id || f.ID, message: f.message }))
+                        showFailures(items)
+                    }
+                }
+            } catch (e) { /* ignore */ }
         } catch (e) { console.error(e) }
+    }
+
+    // Progress UI helpers
+    function openSubmitAllProgress(created) {
+        const modal = document.getElementById('psipred-progress-modal')
+        const close = document.getElementById('psipred-progress-close')
+        const summary = document.getElementById('psipred-progress-summary')
+        const bar = document.getElementById('psipred-progress-bar')
+        const list = document.getElementById('psipred-progress-list')
+        if (!modal || !bar || !list || !summary) return
+        modal.setAttribute('aria-hidden', 'false')
+        summary.textContent = `Submetendo ${created.length} variantes...`
+        list.innerHTML = ''
+        const total = created.length
+        let completed = 0
+        const failures = []
+
+        function updateBar() {
+            const pct = total === 0 ? 100 : Math.round((completed / total) * 100)
+            bar.style.width = pct + '%'
+            summary.textContent = `Progresso: ${completed}/${total} (${pct}%)`
+        }
+
+        // create list entries and start polling for each job id
+        created.forEach(item => {
+            const variant = item.variant || item[0] || ''
+            const jobID = item.job_id || item[1] || ''
+            const li = document.createElement('li')
+            li.textContent = `${variant} — aguardando criação do job...`
+            list.appendChild(li)
+
+                // poll internal job until final and update li
+                (async function poll(jobID, li, variant) {
+                    // wait for job to appear and then poll state
+                    let attempts = 0
+                    let final = false
+                    while (!final && attempts < 300) { // cap attempts to avoid infinite loop (~40 mins if interval 8s)
+                        try {
+                            const res = await fetch('/api/psipred/job/' + jobID)
+                            if (res.status === 404) {
+                                li.textContent = `${variant} — aguardando criação... (${attempts})`
+                            } else if (!res.ok) {
+                                li.textContent = `${variant} — erro (${res.status})`
+                            } else {
+                                const j = await res.json()
+                                const state = j.state || j.remote_state || 'unknown'
+                                li.textContent = `${variant} — ${state}`
+                                if (state === 'complete' || state === 'error') {
+                                    final = true
+                                    if (state === 'error') {
+                                        failures.push({ variant: variant, job_id: jobID, message: j.message || 'remote error' })
+                                    }
+                                    // if remote uuid present, mark the variant as sent
+                                    if (j.remote_uuid) markVariantSent(j.variant_code || variant)
+                                    completed++
+                                    updateBar()
+                                    break
+                                }
+                            }
+                        } catch (e) {
+                            li.textContent = `${variant} — falha: ${e.message}`
+                        }
+                        attempts++
+                        await new Promise(r => setTimeout(r, 8000))
+                    }
+                    if (!final) {
+                        // consider timed out as failure
+                        failures.push({ variant: variant, job_id: jobID, message: 'timeout' })
+                        completed++
+                        updateBar()
+                    }
+                    // when all done, close and surface failures
+                    if (completed >= total) {
+                        setTimeout(() => {
+                            modal.setAttribute('aria-hidden', 'true')
+                            if (failures.length > 0) showFailures(failures)
+                            refreshJobsList()
+                        }, 800)
+                    }
+                })(jobID, li, variant)
+        })
+        updateBar()
+        if (close) close.addEventListener('click', function () { modal.setAttribute('aria-hidden', 'true') })
+    }
+
+    // Display failures in the failures section
+    function showFailures(failures) {
+        const sec = document.getElementById('psipred-failures')
+        const list = document.getElementById('psipred-failures-list')
+        if (!sec || !list) return
+        list.innerHTML = ''
+        failures.forEach(f => {
+            const li = document.createElement('li')
+            li.innerHTML = `<strong>${f.variant}</strong> — ${f.message} ${f.job_id ? `(<code>${f.job_id}</code>)` : ''} <a href="#" data-retry-variant="${f.variant}">Reenviar</a>`
+            list.appendChild(li)
+        })
+        sec.style.display = failures.length ? 'block' : 'none'
+
+        // wire reenviar handlers
+        document.querySelectorAll('a[data-retry-variant]').forEach(a => {
+            a.addEventListener('click', async function (ev) {
+                ev.preventDefault()
+                const variant = this.getAttribute('data-retry-variant')
+                try {
+                    const resp = await fetch('/psipred/submit/' + variant, { method: 'POST' })
+                    if (!resp.ok) throw new Error(await resp.text())
+                    // optimistic: remove item from list
+                    this.parentElement.remove()
+                } catch (e) {
+                    alert('Falha ao reenviar: ' + e.message)
+                }
+            })
+        })
     }
 
     // if we are on the jobs page, refresh periodically
